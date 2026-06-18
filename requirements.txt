@@ -1,0 +1,10 @@
+fabio
+h5py
+matplotlib
+numpy
+pyFAI
+pyqtgraph
+pyzmq
+PyQt5
+kafka-python
+bluesky-kafka
