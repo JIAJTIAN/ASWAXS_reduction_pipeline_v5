@@ -552,7 +552,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
         form.addRow("Air group", self.air_group_spin)
         form.addRow("Empty group", self.empty_group_spin)
         form.addRow("CPU cores", self.core_spin)
-        layout.addWidget(QtWidgets.QLabel("ASAXS sample/solvent pairs"))
+        self.pair_table_label = QtWidgets.QLabel("ASAXS sample/solvent pairs")
+        layout.addWidget(self.pair_table_label)
         layout.addWidget(self.pair_table)
         layout.addLayout(pair_buttons)
         layout.addLayout(buttons)
@@ -751,7 +752,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
     def _reduction_mode_changed(self) -> None:
         is_asaxs = self.reduction_mode_combo.currentData() == "asaxs"
-        self.pair_table.setEnabled(is_asaxs)
+        self.pair_table.setEnabled(True)
+        self.pair_table_label.setText(
+            "ASAXS sample/solvent pairs" if is_asaxs else "SAXS XAnos output name (first row used; groups ignored)"
+        )
         self.schedule_save_builder_settings()
 
     def open_rack_builder(self) -> None:
@@ -932,6 +936,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         if not self.output_dir_edit.text().strip():
             self._update_auto_output_dir(force=True)
         pairs: list[AsaxsPair] = []
+        is_asaxs = self.reduction_mode_combo.currentData() == "asaxs"
         for row in range(self.pair_table.rowCount()):
             name_item = self.pair_table.item(row, 0)
             sample_item = self.pair_table.item(row, 1)
@@ -940,6 +945,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
             sample = sample_item.text().strip() if sample_item else ""
             solvent = solvent_item.text().strip() if solvent_item else ""
             if not name and not sample and not solvent:
+                continue
+            if not is_asaxs:
+                if name:
+                    pairs.append(AsaxsPair(name, 0, 0))
                 continue
             if not sample.isdigit() or not solvent.isdigit():
                 raise ValueError(f"ASAXS pair row {row + 1} needs numeric sample and solvent groups.")

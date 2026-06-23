@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("QtAgg")
-import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
+os.environ.setdefault("QT_API", "pyqt5")
+
 from PyQt5 import QtWidgets
+
+import matplotlib
+matplotlib.use("Qt5Agg")
+import numpy as np
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+from pyFAI import load as load_poni
 
 from .io_utils import DEFAULT_DATASET_PATH, load_hdf5_image
 from .processing import (
@@ -19,11 +25,16 @@ from .processing import (
     export_mask_as_edf,
     launch_pyfai_calib2,
     launch_pyfai_drawmask,
+    launch_pyfai_integrate,
     load_mask,
     load_mask_from_edf,
     load_poni_summary,
     save_mask,
+    write_pyfai_integrate_config,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class PreprocessingWindow(QtWidgets.QMainWindow):
@@ -42,8 +53,12 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self.current_poni_path: Path | None = None
         self.current_edf_path: Path | None = None
         self.current_mask_edf_path: Path | None = None
+        self.current_integrate_config_path: Path | None = None
+        self.current_integrate_output_dir: Path | None = None
+        self.current_radial_curve: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         self._calib2_process = None
         self._drawmask_process = None
+        self._integrate_process = None
 
         self._build_ui()
         if initial_path:
@@ -97,6 +112,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self._build_load_group()
         self._build_calibration_group()
         self._build_mask_group()
+        self._build_integrate_group()
 
         self.status_label = QtWidgets.QLabel("Load an HDF5 file to begin.")
         self.status_label.setWordWrap(True)
@@ -132,6 +148,67 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         form.addRow("Detector", self.detector_info_label)
         form.addRow("Metadata", self.metadata_label)
         form.addRow("Position", self.detector_position_label)
+        self.calibration_layout.addWidget(box)
+
+    def _build_integrate_group(self) -> None:
+        box = QtWidgets.QGroupBox("4. Test Integration In pyFAI")
+        form = QtWidgets.QFormLayout(box)
+
+        self.integrate_note_label = QtWidgets.QLabel(
+            "Uses HDF5 metadata, the exported EDF bridge, optional loaded PONI/mask, and these settings to open pyFAI-integrate."
+        )
+        self.integrate_note_label.setWordWrap(True)
+        self.integrate_npt_spin = QtWidgets.QSpinBox()
+        self.integrate_npt_spin.setRange(16, 20000)
+        self.integrate_npt_spin.setValue(1000)
+        self.integrate_unit_edit = QtWidgets.QLineEdit("q_A^-1")
+        self.azimuth_min_spin = QtWidgets.QDoubleSpinBox()
+        self.azimuth_min_spin.setRange(-360.0, 360.0)
+        self.azimuth_min_spin.setDecimals(3)
+        self.azimuth_min_spin.setValue(-180.0)
+        self.azimuth_max_spin = QtWidgets.QDoubleSpinBox()
+        self.azimuth_max_spin.setRange(-360.0, 360.0)
+        self.azimuth_max_spin.setDecimals(3)
+        self.azimuth_max_spin.setValue(180.0)
+        azimuth_row = QtWidgets.QWidget()
+        azimuth_layout = QtWidgets.QHBoxLayout(azimuth_row)
+        azimuth_layout.setContentsMargins(0, 0, 0, 0)
+        azimuth_layout.addWidget(QtWidgets.QLabel("min"))
+        azimuth_layout.addWidget(self.azimuth_min_spin)
+        azimuth_layout.addWidget(QtWidgets.QLabel("max"))
+        azimuth_layout.addWidget(self.azimuth_max_spin)
+        azimuth_layout.addWidget(QtWidgets.QLabel("deg"))
+        self.integrate_output_dir_edit = QtWidgets.QLineEdit()
+        self.integrate_output_dir_edit.setPlaceholderText("Choose pyFAI-integrate output folder.")
+        browse_integrate_output = QtWidgets.QPushButton("Browse")
+        browse_integrate_output.clicked.connect(self._browse_integrate_output_dir)
+        integrate_output_row = QtWidgets.QWidget()
+        integrate_output_layout = QtWidgets.QHBoxLayout(integrate_output_row)
+        integrate_output_layout.setContentsMargins(0, 0, 0, 0)
+        integrate_output_layout.addWidget(self.integrate_output_dir_edit, 1)
+        integrate_output_layout.addWidget(browse_integrate_output)
+        self.integrate_config_label = QtWidgets.QLabel("Config: -")
+        self.integrate_config_label.setWordWrap(True)
+        self.integrate_output_label = QtWidgets.QLabel("Output: -")
+        self.integrate_output_label.setWordWrap(True)
+
+        radial_preview_button = QtWidgets.QPushButton("Integrate Current Image")
+        radial_preview_button.clicked.connect(self._integrate_current_image)
+        save_curve_button = QtWidgets.QPushButton("Save Current I(q)")
+        save_curve_button.clicked.connect(self._save_current_radial_curve)
+        integrate_button = QtWidgets.QPushButton("Launch pyFAI-integrate")
+        integrate_button.clicked.connect(self._launch_integrate)
+
+        form.addRow("", self.integrate_note_label)
+        form.addRow("Radial bins", self.integrate_npt_spin)
+        form.addRow("Unit", self.integrate_unit_edit)
+        form.addRow("Azimuth range", azimuth_row)
+        form.addRow("Output folder", integrate_output_row)
+        form.addRow("", radial_preview_button)
+        form.addRow("", save_curve_button)
+        form.addRow("", integrate_button)
+        form.addRow("pyFAI config", self.integrate_config_label)
+        form.addRow("pyFAI output", self.integrate_output_label)
         self.calibration_layout.addWidget(box)
 
     def _build_calibration_group(self) -> None:
@@ -229,6 +306,9 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self.current_poni_path = None
         self.current_edf_path = None
         self.current_mask_edf_path = None
+        self.current_integrate_config_path = None
+        self.current_integrate_output_dir = None
+        self.current_radial_curve = None
 
         self.file_path_edit.setText(str(loaded.path))
         self.dataset_path_edit.setText(loaded.dataset_path)
@@ -245,6 +325,9 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self.edf_path_label.setText("EDF bridge: -")
         self.poni_path_label.setText("PONI: -")
         self.poni_summary_label.setText("Calibration summary: -")
+        self.integrate_config_label.setText("Config: -")
+        self.integrate_output_label.setText("Output: -")
+        self.integrate_output_dir_edit.setText(str(self._default_integrate_output_dir()))
         self.mask_path_label.setText("Mask: -")
         self.mask_stats_label.setText("Mask pixels: -")
         detector_text = loaded.metadata.get("detector_name") or "-"
@@ -255,7 +338,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
             f"distance_mm={distance_text if distance_text is not None else '-'}"
         )
         self._update_image_view()
-        self.status_label.setText("HDF5 loaded. Next step: export EDF bridge and open pyFAI-calib2.")
+        self.status_label.setText("HDF5 loaded. You can export EDF, calibrate, mask, or launch pyFAI-integrate with metadata prefilled.")
 
     def _format_detector_positions(self, metadata: dict[str, object]) -> str:
         saxs = metadata.get("saxs_detector_position_mm") or metadata.get("saxs_detector_position") or {}
@@ -277,18 +360,44 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
 
     def _default_edf_path(self) -> Path:
         assert self.current_file is not None
-        return self.current_file.with_suffix(".pyfai_setup.edf")
+        return self._pyfai_bridge_dir() / f"{self.current_file.stem}.pyfai_setup.edf"
 
     def _default_mask_edf_path(self) -> Path:
         assert self.current_file is not None
-        return self.current_file.with_suffix(".pyfai_mask_input.edf")
+        return self._pyfai_bridge_dir() / f"{self.current_file.stem}.pyfai_mask_input.edf"
+
+    def _default_integrate_config_path(self) -> Path:
+        assert self.current_file is not None
+        return self._pyfai_bridge_dir() / f"{self.current_file.stem}.azimint.json"
+
+    def _default_integrate_output_dir(self) -> Path:
+        assert self.current_file is not None
+        run_stamp = time.strftime("%Y%m%d_%H%M%S")
+        return self._pyfai_bridge_dir() / "integrated" / f"{self.current_file.stem}_{run_stamp}"
+
+    def _browse_integrate_output_dir(self) -> None:
+        start = self.integrate_output_dir_edit.text().strip()
+        if not start and self.current_file is not None:
+            start = str(self._default_integrate_output_dir())
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose pyFAI-integrate output folder",
+            start or str(Path.home()),
+        )
+        if folder:
+            self.integrate_output_dir_edit.setText(folder)
+
+    def _pyfai_bridge_dir(self) -> Path:
+        assert self.current_file is not None
+        safe_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in self.current_file.stem).strip("._")
+        return PROJECT_ROOT / "outputs" / "pyfai_bridge" / (safe_name or "hdf5_image")
 
     def _export_current_edf(self) -> None:
         if self.current_image is None or self.current_file is None:
             self.status_label.setText("Load an HDF5 file before exporting EDF.")
             return
         path = self._default_edf_path()
-        export_image_as_edf(path, self.current_image)
+        export_image_as_edf(path, self.current_image, metadata=self.current_metadata)
         self.current_edf_path = path
         self.edf_path_label.setText(str(path))
         self.status_label.setText(f"Exported EDF bridge to {path.name}.")
@@ -301,7 +410,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
             self._export_current_edf()
         mask_path = None
         if self.current_mask is not None and self.current_file is not None:
-            mask_path = self.current_file.with_suffix(".pyfai_mask.edf")
+            mask_path = self._pyfai_bridge_dir() / f"{self.current_file.stem}.pyfai_mask.edf"
             export_mask_as_edf(mask_path, self.current_mask)
         try:
             self._calib2_process = launch_pyfai_calib2(
@@ -339,7 +448,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
             self.status_label.setText("Load an HDF5 file before exporting a mask EDF bridge.")
             return
         path = self._default_mask_edf_path()
-        export_image_as_edf(path, self.current_image)
+        export_image_as_edf(path, self.current_image, metadata=self.current_metadata)
         self.current_mask_edf_path = path
         self.status_label.setText(f"Exported mask EDF bridge to {path.name}.")
 
@@ -357,6 +466,117 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self.status_label.setText(
             f"pyFAI-drawmask launched on {self.current_mask_edf_path.name}. Save the mask EDF in pyFAI, then import it here."
         )
+
+    def _launch_integrate(self) -> None:
+        if self.current_image is None or self.current_file is None:
+            self.status_label.setText("Load an HDF5 file before launching pyFAI-integrate.")
+            return
+        if self.current_edf_path is None or not self.current_edf_path.exists():
+            self._export_current_edf()
+        mask_path = None
+        if self.current_mask is not None:
+            mask_path = self._pyfai_bridge_dir() / f"{self.current_file.stem}.pyfai_integrate_mask.edf"
+            export_mask_as_edf(mask_path, self.current_mask)
+        config_path = self._default_integrate_config_path()
+        output_dir = Path(self.integrate_output_dir_edit.text().strip()).expanduser() if self.integrate_output_dir_edit.text().strip() else self._default_integrate_output_dir()
+        try:
+            self.current_integrate_config_path = write_pyfai_integrate_config(
+                config_path,
+                poni_path=self.current_poni_path if self.current_poni_path and self.current_poni_path.exists() else None,
+                mask_path=mask_path,
+                npt=self.integrate_npt_spin.value(),
+                unit=self.integrate_unit_edit.text().strip() or "q_A^-1",
+                h5_metadata=self.current_metadata,
+                image_shape=tuple(int(part) for part in self.current_image.shape),
+                azimuth_range=self._azimuth_range(),
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.current_integrate_output_dir = output_dir
+            self._integrate_process = launch_pyfai_integrate(
+                edf_path=self.current_edf_path,
+                config_path=self.current_integrate_config_path,
+                output_dir=output_dir,
+            )
+        except Exception as exc:
+            self.status_label.setText(f"Failed to launch pyFAI-integrate: {exc}")
+            return
+        self.integrate_config_label.setText(str(self.current_integrate_config_path))
+        self.integrate_output_label.setText(str(output_dir))
+        self.status_label.setText(
+            f"pyFAI-integrate launched on {self.current_edf_path.name} with HDF5 metadata"
+            f"{' and loaded PONI' if self.current_poni_path else ''} linked."
+        )
+
+    def _integrate_current_image(self) -> None:
+        if self.current_image is None:
+            self.status_label.setText("Load an HDF5 file before integrating.")
+            return
+        if self.current_poni_path is None or not self.current_poni_path.exists():
+            self.status_label.setText("Load a calibrated PONI before native radial integration.")
+            return
+        mask = self.current_mask.astype(bool) if self.current_mask is not None else None
+        try:
+            ai = load_poni(str(self.current_poni_path))
+            variance = np.abs(np.asarray(self.current_image, dtype=np.float32))
+            result = ai.integrate1d(
+                self.current_image,
+                self.integrate_npt_spin.value(),
+                mask=mask,
+                unit=self.integrate_unit_edit.text().strip() or "q_A^-1",
+                variance=variance,
+                error_model="poisson",
+                azimuth_range=self._azimuth_range(),
+            )
+            q = np.asarray(result.radial, dtype=float)
+            intensity = np.asarray(result.intensity, dtype=float)
+            sigma = np.asarray(getattr(result, "sigma", np.full_like(intensity, np.nan)), dtype=float)
+        except Exception as exc:
+            self.status_label.setText(f"Failed to integrate current image: {exc}")
+            return
+        self.current_radial_curve = (q, intensity, sigma)
+        self.image_ax.clear()
+        keep = np.isfinite(q) & np.isfinite(intensity)
+        self.image_ax.plot(q[keep], intensity[keep], lw=1.2)
+        self.image_ax.set_title("Radial Integration Preview")
+        self.image_ax.set_xlabel(self.integrate_unit_edit.text().strip() or "q_A^-1")
+        self.image_ax.set_ylabel("I(q)")
+        self.image_ax.set_yscale("log")
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+        self.status_label.setText(f"Integrated current image: {np.count_nonzero(keep)} q bins.")
+
+    def _save_current_radial_curve(self) -> None:
+        if self.current_radial_curve is None:
+            self.status_label.setText("Integrate the current image before saving I(q).")
+            return
+        start = str(self._pyfai_bridge_dir() / f"{self.current_file.stem}_radial.dat") if self.current_file else ""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save radial I(q)", start, "DAT files (*.dat);;Text files (*.txt);;All files (*)")
+        if not path:
+            return
+        q, intensity, sigma = self.current_radial_curve
+        output = Path(path).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        header = "\n".join(
+            [
+                "ASWAXS pyFAI radial integration preview",
+                f"source_h5={self.current_file}",
+                f"poni={self.current_poni_path}",
+                f"unit={self.integrate_unit_edit.text().strip() or 'q_A^-1'}",
+                f"azimuth_range_deg={self._azimuth_range()}",
+                "columns=q I sigma_I",
+            ]
+        )
+        np.savetxt(output, np.column_stack([q, intensity, sigma]), header=header, comments="#")
+        self.status_label.setText(f"Saved radial I(q) to {output}.")
+
+    def _azimuth_range(self) -> tuple[float, float] | None:
+        lower = float(self.azimuth_min_spin.value())
+        upper = float(self.azimuth_max_spin.value())
+        if lower <= -180.0 and upper >= 180.0:
+            return None
+        if lower >= upper:
+            raise ValueError("Azimuth min must be smaller than azimuth max.")
+        return lower, upper
 
     def _import_mask_edf_dialog(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import pyFAI Mask EDF", "", "EDF files (*.edf)")

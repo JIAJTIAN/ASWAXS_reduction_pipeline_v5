@@ -17,6 +17,8 @@ from aswaxs_live.xanos_export import export_analysis_h5_to_xanos_format
 
 
 DEFAULT_OVERLAP_Q_MAX = 0.20
+EDGE_SCALE_POINTS = 40
+MIN_EDGE_SCALE_POINTS = 5
 
 
 @dataclass
@@ -462,6 +464,7 @@ def update_live_stitched_averages(
                     curve.attrs["overlap_q_max"] = float(q_max)
                     curve.attrs["join_q"] = float(join_q)
                     curve.attrs["n_overlap_points"] = int(n_overlap)
+                    curve.attrs["scale_method"] = "gap_edge_extrapolation" if n_overlap == 0 else "overlap_median_ratio"
                     curve.attrs["low_q_points"] = int(low_q_points)
                     curve.attrs["high_q_points"] = int(high_q_points)
                     source_low_q = q_for_reduction_row(low_q_rows.q, row)
@@ -495,6 +498,7 @@ def _stitched_curve_is_current(curve: h5py.Group, low_q_rows: ReductionRows, hig
             or str(curve.attrs.get("high_q_analysis_h5", "")) != str(high_q_rows.path)
             or int(curve.attrs.get("low_q_row_index", -1)) != row
             or int(curve.attrs.get("high_q_row_index", -1)) != row
+            or "scale_method" not in curve.attrs
         ):
             return False
         low_q_axis = q_for_reduction_row(low_q_rows.q, row)
@@ -743,14 +747,66 @@ def q_for_reduction_row(q: np.ndarray, row: int) -> np.ndarray:
 
 def scale_high_q_to_low_q(low_q: np.ndarray, high_q: np.ndarray, overlap_q_max: float) -> tuple[float, float, float, int]:
     q_low = max(float(np.nanmin(low_q[:, 0])), float(np.nanmin(high_q[:, 0])))
-    q_high = min(float(np.nanmax(low_q[:, 0])), float(np.nanmax(high_q[:, 0])), float(overlap_q_max))
+    detector_overlap_q_high = min(float(np.nanmax(low_q[:, 0])), float(np.nanmax(high_q[:, 0])))
+    q_high = min(detector_overlap_q_high, float(overlap_q_max))
+    if q_high < q_low:
+        q_high = detector_overlap_q_high
     overlap = high_q[(high_q[:, 0] >= q_low) & (high_q[:, 0] <= q_high) & (high_q[:, 1] > 0)]
-    if overlap.shape[0] < 3:
-        raise ValueError("Too few positive overlap points for detector stitching.")
-    low_q_positive = low_q[(low_q[:, 0] > 0) & (low_q[:, 1] > 0)]
-    low_q_at_high_q = np.exp(np.interp(np.log(overlap[:, 0]), np.log(low_q_positive[:, 0]), np.log(low_q_positive[:, 1])))
-    ratios = low_q_at_high_q / overlap[:, 1]
-    ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
-    if ratios.size < 3:
+    if overlap.shape[0] >= 3:
+        low_q_positive = low_q[(low_q[:, 0] > 0) & (low_q[:, 1] > 0)]
+        low_q_at_high_q = np.exp(np.interp(np.log(overlap[:, 0]), np.log(low_q_positive[:, 0]), np.log(low_q_positive[:, 1])))
+        ratios = low_q_at_high_q / overlap[:, 1]
+        ratios = ratios[np.isfinite(ratios) & (ratios > 0)]
+        if ratios.size >= 3:
+            return float(np.median(ratios)), float(np.nanmin(overlap[:, 0])), float(np.nanmax(overlap[:, 0])), int(ratios.size)
+    return estimate_gap_scale_high_q_to_low_q(low_q, high_q)
+
+
+def estimate_gap_scale_high_q_to_low_q(low_q: np.ndarray, high_q: np.ndarray) -> tuple[float, float, float, int]:
+    """Estimate detector scale when q coverage has a gap instead of overlap.
+
+    The estimate uses the high-q edge of the low-q detector and the low-q edge of
+    the high-q detector.  Each edge is fit as log(I) = a + b log(q), then both
+    fits are evaluated at the geometric midpoint of the gap.
+    """
+    low_edge = _positive_sorted_curve(low_q)
+    high_edge = _positive_sorted_curve(high_q)
+    if low_edge.shape[0] < MIN_EDGE_SCALE_POINTS or high_edge.shape[0] < MIN_EDGE_SCALE_POINTS:
+        raise ValueError("Too few positive edge points for gap scaling.")
+    low_q_max = float(np.nanmax(low_edge[:, 0]))
+    high_q_min = float(np.nanmin(high_edge[:, 0]))
+    if not np.isfinite(low_q_max) or not np.isfinite(high_q_min) or low_q_max <= 0 or high_q_min <= 0:
+        raise ValueError("Invalid q edges for gap scaling.")
+    if low_q_max >= high_q_min:
         raise ValueError("Too few valid overlap ratios for detector stitching.")
-    return float(np.median(ratios)), float(np.nanmin(overlap[:, 0])), float(np.nanmax(overlap[:, 0])), int(ratios.size)
+    q_join = float(np.sqrt(low_q_max * high_q_min))
+    low_window = low_edge[-min(EDGE_SCALE_POINTS, low_edge.shape[0]) :]
+    high_window = high_edge[: min(EDGE_SCALE_POINTS, high_edge.shape[0])]
+    low_estimate = _loglog_edge_estimate(low_window, q_join)
+    high_estimate = _loglog_edge_estimate(high_window, q_join)
+    if not np.isfinite(low_estimate) or not np.isfinite(high_estimate) or high_estimate <= 0:
+        raise ValueError("Could not estimate detector scale across q gap.")
+    return float(low_estimate / high_estimate), low_q_max, high_q_min, 0
+
+
+def _positive_sorted_curve(curve: np.ndarray) -> np.ndarray:
+    curve = np.asarray(curve, dtype=float)
+    mask = np.isfinite(curve[:, 0]) & np.isfinite(curve[:, 1]) & (curve[:, 0] > 0) & (curve[:, 1] > 0)
+    positive = curve[mask]
+    if positive.size == 0:
+        return positive.reshape(0, curve.shape[1])
+    return positive[np.argsort(positive[:, 0])]
+
+
+def _loglog_edge_estimate(window: np.ndarray, q_value: float) -> float:
+    if window.shape[0] < MIN_EDGE_SCALE_POINTS:
+        raise ValueError("Too few edge points for log-log fit.")
+    x = np.log(window[:, 0])
+    y = np.log(window[:, 1])
+    if not (np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+        raise ValueError("Invalid edge points for log-log fit.")
+    if np.nanmax(x) - np.nanmin(x) <= 1e-12:
+        return float(np.exp(np.nanmedian(y)))
+    slope, intercept = np.polyfit(x, y, 1)
+    estimate = np.exp(intercept + slope * np.log(q_value))
+    return float(estimate)

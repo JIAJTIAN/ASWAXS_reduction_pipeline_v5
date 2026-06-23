@@ -100,6 +100,25 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         controls.addWidget(plot_button)
         left_layout.addLayout(controls)
 
+        background_controls = QtWidgets.QHBoxLayout()
+        self.subtract_background_check = QtWidgets.QCheckBox("subtract background")
+        self.subtract_background_check.stateChanged.connect(self.plot_selected)
+        self.background_combo = QtWidgets.QComboBox()
+        self.background_combo.setMinimumContentsLength(28)
+        self.background_combo.currentIndexChanged.connect(self.plot_selected)
+        self.background_factor_spin = QtWidgets.QDoubleSpinBox()
+        self.background_factor_spin.setRange(-1000.0, 1000.0)
+        self.background_factor_spin.setDecimals(5)
+        self.background_factor_spin.setSingleStep(0.01)
+        self.background_factor_spin.setValue(1.0)
+        self.background_factor_spin.valueChanged.connect(self.plot_selected)
+        background_controls.addWidget(self.subtract_background_check)
+        background_controls.addWidget(QtWidgets.QLabel("Background"))
+        background_controls.addWidget(self.background_combo, 1)
+        background_controls.addWidget(QtWidgets.QLabel("Factor"))
+        background_controls.addWidget(self.background_factor_spin)
+        left_layout.addLayout(background_controls)
+
         self.curve_list = QtWidgets.QListWidget()
         self.curve_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.curve_list.itemDoubleClicked.connect(lambda _item: self.plot_selected())
@@ -156,10 +175,24 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         except Exception as exc:  # noqa: BLE001 - show GUI-friendly error.
             self.status_label.setText(f"Could not read HDF5: {exc}")
             return
+        self._refill_background_combo()
         self._refill_curve_list(select_first=True)
         source_text = f" in {len(h5_paths)} HDF5 file(s)" if path.is_dir() else ""
         self.status_label.setText(f"Found {len(self.curves)} plottable q-data rows{source_text}.")
         self.plot_selected()
+
+    def _refill_background_combo(self) -> None:
+        previous_index = self.background_combo.currentData()
+        self.background_combo.blockSignals(True)
+        self.background_combo.clear()
+        self.background_combo.addItem("(none)", None)
+        for index, curve in enumerate(self.curves):
+            self.background_combo.addItem(curve.label, index)
+        if previous_index is not None:
+            match = self.background_combo.findData(previous_index)
+            if match >= 0:
+                self.background_combo.setCurrentIndex(match)
+        self.background_combo.blockSignals(False)
 
     def _refill_curve_list(self, select_first: bool = False) -> None:
         needle = self.filter_edit.text().strip().lower()
@@ -184,6 +217,12 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         if not selected:
             self.status_label.setText("Select one or more curves to plot.")
             return
+        background = None
+        if self.subtract_background_check.isChecked():
+            background = self._background_curve_data(path)
+            if background is None:
+                self.status_label.setText("Choose one background curve before plotting background subtraction.")
+                return
         plotted = 0
         try:
             for record_index in selected:
@@ -198,6 +237,18 @@ class H5IqViewerDialog(QtWidgets.QDialog):
                     intensity = intensity[:n]
                     if sigma is not None:
                         sigma = np.asarray(sigma, dtype=float).reshape(-1)[:n]
+                    label = record.label
+                    if background is not None:
+                        q, intensity, sigma = _subtract_background_curve(
+                            q,
+                            intensity,
+                            sigma,
+                            background[0],
+                            background[1],
+                            background[2],
+                            self.background_factor_spin.value(),
+                        )
+                        label = f"{record.label} - {self.background_factor_spin.value():.5g} x {background[3]}"
                     mask = np.isfinite(q) & np.isfinite(intensity)
                     if self.log_q_check.isChecked():
                         mask &= q > 0
@@ -206,14 +257,32 @@ class H5IqViewerDialog(QtWidgets.QDialog):
                     if np.count_nonzero(mask) < 2:
                         continue
                     pen = pg.mkPen(pg.intColor(plotted, hues=max(8, len(selected))), width=1.4)
-                    self.plot.plot(q[mask], intensity[mask], pen=pen, name=record.label)
+                    self.plot.plot(q[mask], intensity[mask], pen=pen, name=label)
                     if self.error_check.isChecked() and sigma is not None:
                         self._plot_error_bars(q, intensity, sigma, mask, pen)
                     plotted += 1
         except Exception as exc:  # noqa: BLE001
             self.status_label.setText(f"Could not plot selected curves: {exc}")
             return
-        self.status_label.setText(f"Plotted {plotted}/{len(selected)} selected curves.")
+        suffix = " with background subtraction" if background is not None else ""
+        self.status_label.setText(f"Plotted {plotted}/{len(selected)} selected curves{suffix}.")
+
+    def _background_curve_data(self, default_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str] | None:
+        record_index = self.background_combo.currentData()
+        if record_index is None or not (0 <= int(record_index) < len(self.curves)):
+            return None
+        record = self.curves[int(record_index)]
+        h5_path = Path(record.h5_path) if record.h5_path else default_path
+        with h5py.File(h5_path, "r") as handle:
+            q, intensity, sigma = read_curve_row(handle, record)
+        q = np.asarray(q, dtype=float).reshape(-1)
+        intensity = np.asarray(intensity, dtype=float).reshape(-1)
+        n = min(q.size, intensity.size)
+        q = q[:n]
+        intensity = intensity[:n]
+        if sigma is not None:
+            sigma = np.asarray(sigma, dtype=float).reshape(-1)[:n]
+        return q, intensity, sigma, record.label
 
     def _plot_error_bars(self, q: np.ndarray, intensity: np.ndarray, sigma: np.ndarray, mask: np.ndarray, pen: pg.mkPen) -> None:
         sigma_mask = mask & np.isfinite(sigma) & (sigma >= 0)
@@ -408,6 +477,55 @@ def read_curve_row(handle: h5py.File, record: H5CurveRecord) -> tuple[np.ndarray
         if q.ndim == 2:
             q = q[record.row if record.row < q.shape[0] else 0]
     return q, intensity, sigma
+
+
+def _subtract_background_curve(
+    q: np.ndarray,
+    intensity: np.ndarray,
+    sigma: np.ndarray | None,
+    background_q: np.ndarray,
+    background_intensity: np.ndarray,
+    background_sigma: np.ndarray | None,
+    factor: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    background_on_q = _interpolate_to_q(background_q, background_intensity, q)
+    corrected = intensity - factor * background_on_q
+    corrected_sigma: np.ndarray | None = None
+    if sigma is not None:
+        corrected_sigma = np.asarray(sigma, dtype=float).copy()
+    if background_sigma is not None:
+        background_sigma_on_q = _interpolate_to_q(background_q, background_sigma, q)
+        if corrected_sigma is None:
+            corrected_sigma = np.abs(factor) * background_sigma_on_q
+        else:
+            corrected_sigma = np.sqrt(corrected_sigma**2 + (factor * background_sigma_on_q) ** 2)
+    return q, corrected, corrected_sigma
+
+
+def _interpolate_to_q(source_q: np.ndarray, source_y: np.ndarray, target_q: np.ndarray) -> np.ndarray:
+    source_q = np.asarray(source_q, dtype=float).reshape(-1)
+    source_y = np.asarray(source_y, dtype=float).reshape(-1)
+    target_q = np.asarray(target_q, dtype=float).reshape(-1)
+    n = min(source_q.size, source_y.size)
+    source_q = source_q[:n]
+    source_y = source_y[:n]
+    if source_q.size == target_q.size and np.allclose(source_q, target_q, rtol=1e-7, atol=1e-12, equal_nan=False):
+        return source_y.copy()
+    mask = np.isfinite(source_q) & np.isfinite(source_y)
+    source_q = source_q[mask]
+    source_y = source_y[mask]
+    if source_q.size < 2:
+        return np.full_like(target_q, np.nan, dtype=float)
+    order = np.argsort(source_q)
+    source_q = source_q[order]
+    source_y = source_y[order]
+    unique_q, unique_indices = np.unique(source_q, return_index=True)
+    unique_y = source_y[unique_indices]
+    if unique_q.size < 2:
+        return np.full_like(target_q, np.nan, dtype=float)
+    interpolated = np.interp(target_q, unique_q, unique_y, left=np.nan, right=np.nan)
+    interpolated[~np.isfinite(target_q)] = np.nan
+    return interpolated
 
 
 def add_h5_children(parent: QtWidgets.QTreeWidgetItem, group: h5py.Group | h5py.File, counter: dict[str, Any]) -> None:

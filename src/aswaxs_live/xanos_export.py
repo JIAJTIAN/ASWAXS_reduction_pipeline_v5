@@ -14,7 +14,11 @@ XANOS_FOLDER_NAME = "XAnos format"
 XANOS_FILE_LIST_NAME = "xanos_file_list.txt"
 
 
-def export_analysis_h5_to_xanos_format(analysis_h5_path: str | Path) -> list[Path]:
+def export_analysis_h5_to_xanos_format(
+    analysis_h5_path: str | Path,
+    saxs_output_name: str | None = None,
+    force_saxs: bool = False,
+) -> list[Path]:
     """Write one XAnoS-compatible final sample curve per energy.
 
     The analysis HDF5 remains the authoritative processing record. This helper
@@ -29,52 +33,64 @@ def export_analysis_h5_to_xanos_format(analysis_h5_path: str | Path) -> list[Pat
     if not path.exists():
         return []
     with h5py.File(path, "r") as handle:
-        named_root = handle.get("/entry/asaxs_outputs")
-        if named_root is not None:
-            named_payloads = []
-            for output_name in sorted(named_root):
-                group = named_root[output_name].get("corrected_I_q_E")
-                if group is None or "q" not in group or "I" not in group:
-                    continue
-                rows = int(group["I"].shape[0]) if group["I"].ndim > 1 else 1
-                named_payloads.append(
-                    (
-                        output_name,
-                        np.asarray(group["q"][()], dtype=float),
-                        np.asarray(group["I"][()], dtype=float),
-                        np.asarray(group["sigma_I"][()], dtype=float) if "sigma_I" in group else None,
-                        np.asarray(group["energy"][()], dtype=float) if "energy" in group else None,
-                        _xanos_header_rows(handle, group, rows),
-                    )
-                )
-            if named_payloads:
-                written: list[Path] = []
-                for output_name, q, intensity, sigma, energy, header_rows in named_payloads:
-                    written.extend(
-                        _write_xanos_payload(
-                            path,
+        if force_saxs:
+            fallback = _saxs_xanos_payload(handle, path, output_name=saxs_output_name)
+            if fallback is None:
+                return []
+            output_name, q, intensity, sigma, energy, h5_data_path, header_rows = fallback
+        else:
+            named_root = handle.get("/entry/asaxs_outputs")
+            if named_root is not None:
+                named_payloads = []
+                for output_name in sorted(named_root):
+                    group = named_root[output_name].get("corrected_I_q_E")
+                    if group is None or "q" not in group or "I" not in group:
+                        continue
+                    rows = int(group["I"].shape[0]) if group["I"].ndim > 1 else 1
+                    named_payloads.append(
+                        (
                             output_name,
-                            q,
-                            intensity,
-                            sigma,
-                            energy,
-                            f"/entry/asaxs_outputs/{output_name}/corrected_I_q_E",
-                            header_rows,
+                            np.asarray(group["q"][()], dtype=float),
+                            np.asarray(group["I"][()], dtype=float),
+                            np.asarray(group["sigma_I"][()], dtype=float) if "sigma_I" in group else None,
+                            np.asarray(group["energy"][()], dtype=float) if "energy" in group else None,
+                            _xanos_header_rows(handle, group, rows),
                         )
                     )
-                return written
+                if named_payloads:
+                    written: list[Path] = []
+                    for output_name, q, intensity, sigma, energy, header_rows in named_payloads:
+                        written.extend(
+                            _write_xanos_payload(
+                                path,
+                                output_name,
+                                q,
+                                intensity,
+                                sigma,
+                                energy,
+                                f"/entry/asaxs_outputs/{output_name}/corrected_I_q_E",
+                                header_rows,
+                            )
+                        )
+                    return written
 
-        group = handle.get("/entry/final/corrected_I_q_E")
-        if group is None or "q" not in group or "I" not in group:
-            return []
-        q = np.asarray(group["q"][()], dtype=float)
-        intensity = np.asarray(group["I"][()], dtype=float)
-        sigma = np.asarray(group["sigma_I"][()], dtype=float) if "sigma_I" in group else np.full_like(intensity, np.nan)
-        energy = np.asarray(group["energy"][()], dtype=float) if "energy" in group else np.full((intensity.shape[0],), np.nan)
-        rows = int(intensity.shape[0]) if intensity.ndim > 1 else 1
-        header_rows = _xanos_header_rows(handle, group, rows)
-        if _all_missing_energy(energy):
-            energy = _fallback_energy_values(handle, intensity.shape[0])
+            group = handle.get("/entry/final/corrected_I_q_E")
+            if group is not None and "q" in group and "I" in group:
+                q = np.asarray(group["q"][()], dtype=float)
+                intensity = np.asarray(group["I"][()], dtype=float)
+                sigma = np.asarray(group["sigma_I"][()], dtype=float) if "sigma_I" in group else np.full_like(intensity, np.nan)
+                energy = np.asarray(group["energy"][()], dtype=float) if "energy" in group else np.full((intensity.shape[0],), np.nan)
+                rows = int(intensity.shape[0]) if intensity.ndim > 1 else 1
+                header_rows = _xanos_header_rows(handle, group, rows)
+                output_name = "sample"
+                h5_data_path = "/entry/final/corrected_I_q_E"
+                if _all_missing_energy(energy):
+                    energy = _fallback_energy_values(handle, intensity.shape[0])
+            else:
+                fallback = _saxs_xanos_payload(handle, path, output_name=saxs_output_name)
+                if fallback is None:
+                    return []
+                output_name, q, intensity, sigma, energy, h5_data_path, header_rows = fallback
 
     if intensity.ndim == 1:
         intensity = intensity.reshape(1, -1)
@@ -83,7 +99,7 @@ def export_analysis_h5_to_xanos_format(analysis_h5_path: str | Path) -> list[Pat
     if energy.ndim == 0:
         energy = energy.reshape(1)
 
-    return _write_xanos_payload(path, "sample", q, intensity, sigma, energy, "/entry/final/corrected_I_q_E", header_rows)
+    return _write_xanos_payload(path, output_name, q, intensity, sigma, energy, h5_data_path, header_rows)
 
 
 def _write_xanos_payload(
@@ -113,7 +129,6 @@ def _write_xanos_payload(
 
     output_dir = analysis_h5.parent / XANOS_FOLDER_NAME / output_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    _clear_old_xanos_files(output_dir)
 
     written: list[Path] = []
     for row, curve in enumerate(intensity, start=1):
@@ -134,14 +149,14 @@ def _write_xanos_payload(
             "output_name": output_name,
             "energy_index": row,
             "energy_kev": energy_value if np.isfinite(energy_value) else None,
-            "format": "XAnoS-compatible final reduced sample curve",
+            "format": "XAnoS-compatible reduced I-q curve",
             "CF": cf,
             "Thickness": thickness,
             "xrf_bkg": xrf_bkg,
         }
         header = "\n".join(
             [
-                "ASWAXS final per-energy sample curve exported from analysis HDF5",
+                "Reduced per-energy I-q curve exported from analysis HDF5",
                 f"Energy={energy_value:.9f}" if np.isfinite(energy_value) else "Energy=nan",
                 f"CF={cf:.12g}",
                 f"Thickness={thickness:.12g}",
@@ -173,6 +188,107 @@ def _sigma_failure_message(analysis_h5: Path) -> str:
     if details:
         message += f" {details}"
     return message
+
+
+def _saxs_xanos_payload(
+    handle: h5py.File,
+    analysis_h5: Path,
+    output_name: str | None = None,
+) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, list[dict[str, float | str | None]]] | None:
+    stitched = _stitched_saxs_payload(handle, analysis_h5, output_name=output_name)
+    if stitched is not None:
+        return stitched
+    return _detector_reduction_saxs_payload(handle, analysis_h5, output_name=output_name)
+
+
+def _stitched_saxs_payload(
+    handle: h5py.File,
+    analysis_h5: Path,
+    output_name: str | None = None,
+) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, list[dict[str, float | str | None]]] | None:
+    curves = handle.get("/entry/stitched_averages/curves")
+    if curves is None:
+        return None
+    q_rows: list[np.ndarray] = []
+    intensity_rows: list[np.ndarray] = []
+    sigma_rows: list[np.ndarray] = []
+    energy_rows: list[float] = []
+    header_rows: list[dict[str, float | str | None]] = []
+    for name in sorted(curves):
+        curve = curves[name]
+        if not isinstance(curve, h5py.Group) or "q" not in curve or "I" not in curve:
+            continue
+        q = np.asarray(curve["q"][()], dtype=float)
+        intensity = np.asarray(curve["I"][()], dtype=float)
+        sigma = np.asarray(curve["sigma_I"][()], dtype=float) if "sigma_I" in curve else np.full_like(intensity, np.nan)
+        q, intensity, sigma = _finite_curve_rows(q, intensity, sigma)
+        if q.size == 0:
+            continue
+        q_rows.append(q)
+        intensity_rows.append(intensity)
+        sigma_rows.append(sigma)
+        energy_rows.append(_curve_attr_float(curve, "energy_kev", np.nan))
+        header_rows.append({"CF": 1.0, "Thickness": 1.0, "xrf_bkg": 0.0})
+    if not q_rows:
+        return None
+    output_name = output_name or _analysis_output_name(analysis_h5)
+    return (
+        output_name,
+        _stack_rows(q_rows),
+        _stack_rows(intensity_rows),
+        _stack_rows(sigma_rows),
+        np.asarray(energy_rows, dtype=float),
+        "/entry/stitched_averages/curves",
+        header_rows,
+    )
+
+
+def _detector_reduction_saxs_payload(
+    handle: h5py.File,
+    analysis_h5: Path,
+    output_name: str | None = None,
+) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, list[dict[str, float | str | None]]] | None:
+    group = handle.get("/entry/process_01_reduction/data")
+    if group is None or "q" not in group or "I" not in group:
+        return None
+    intensity = np.asarray(group["I"][()], dtype=float)
+    q = np.asarray(group["q"][()], dtype=float)
+    sigma = np.asarray(group["sigma_I"][()], dtype=float) if "sigma_I" in group else np.full_like(intensity, np.nan)
+    rows = int(intensity.shape[0]) if intensity.ndim > 1 else 1
+    energy = np.asarray(group["energy"][()], dtype=float) if "energy" in group else np.full((rows,), np.nan)
+    return (
+        output_name or _analysis_output_name(analysis_h5),
+        q,
+        intensity,
+        sigma,
+        energy,
+        "/entry/process_01_reduction/data",
+        [{"CF": 1.0, "Thickness": 1.0, "xrf_bkg": 0.0} for _row in range(rows)],
+    )
+
+
+def _analysis_output_name(analysis_h5: Path) -> str:
+    name = analysis_h5.stem
+    if name.endswith("_analysis"):
+        name = name[: -len("_analysis")]
+    return name or "sample"
+
+
+def _curve_attr_float(group: h5py.Group, name: str, default: float) -> float:
+    try:
+        value = float(group.attrs.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if np.isfinite(value) else default
+
+
+def _stack_rows(rows: list[np.ndarray]) -> np.ndarray:
+    if not rows:
+        return np.empty((0, 0), dtype=float)
+    min_width = min(row.size for row in rows)
+    if min_width <= 0:
+        return np.empty((len(rows), 0), dtype=float)
+    return np.vstack([np.asarray(row, dtype=float).reshape(-1)[:min_width] for row in rows])
 
 
 def _group_summary_sigma_details(output_dir: Path) -> str:
@@ -263,16 +379,6 @@ def _safe_output_name(name: str) -> str:
 
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name).strip())
     return cleaned.strip("._") or "sample"
-
-
-def _clear_old_xanos_files(output_dir: Path) -> None:
-    """Replace prior compatibility exports so stale energies do not linger."""
-    for pattern in ("energy_*_final.dat", XANOS_FILE_LIST_NAME):
-        for path in output_dir.glob(pattern):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def _finite_curve_rows(q: np.ndarray, intensity: np.ndarray, sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

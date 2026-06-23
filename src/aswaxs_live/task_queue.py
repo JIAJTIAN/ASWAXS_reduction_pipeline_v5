@@ -149,6 +149,19 @@ class TaskSpec:
     def is_asaxs_mode(self) -> bool:
         return str(self.reduction_mode or "asaxs") == "asaxs"
 
+    def xanos_output_name(self) -> str:
+        """Return the task-level XAnos sample name.
+
+        ASAXS tasks write one folder per sample/solvent pair. SAXS-only tasks do
+        not use the sample/solvent groups, but still use the first pair output
+        name as the XAnos sample/folder name.
+        """
+        for pair in self.asaxs_pairs:
+            name = str(pair.output_name).strip()
+            if name:
+                return name
+        return ""
+
 
 def safe_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
@@ -237,6 +250,8 @@ def preflight_task(task: TaskSpec) -> tuple[bool, str]:
         problems.extend(_calibration_file_problems(label, value))
     if task.is_asaxs_mode() and not task.asaxs_pairs:
         problems.append("no ASAXS pairs")
+    if not task.is_asaxs_mode() and not task.xanos_output_name():
+        problems.append("SAXS XAnos output name missing; enter it in the sample/solvent output table")
     if task.is_asaxs_mode():
         problems.extend(_group_role_problems(task))
     if problems:
@@ -389,8 +404,11 @@ def _finish_saxs_only_task(task: TaskSpec, log: Callable[[str], None], progress:
         if combined_h5.exists():
             combined_h5.unlink()
         shutil.copy2(detector_h5, combined_h5)
+        written = export_analysis_h5_to_xanos_format(combined_h5, saxs_output_name=task.xanos_output_name(), force_saxs=True)
+        if not written:
+            raise RuntimeError("No SAXS XAnos files were written.")
         progress(1.0, "Complete")
-        log(f"{task.task_name}: SAXS-only {detector} reduction complete; ASAXS/XAnos skipped -> {combined_h5}")
+        log(f"{task.task_name}: SAXS-only {detector} reduction complete; XAnos files written -> {_xanos_written_dir(written)}")
         return
 
     progress(0.86, "Stitching SAXS/WAXS detector averages")
@@ -403,8 +421,18 @@ def _finish_saxs_only_task(task: TaskSpec, log: Callable[[str], None], progress:
     )
     if combined is None and not task.combined_h5_path().exists():
         raise RuntimeError("No stitched SAXS/WAXS output was produced.")
+    written = export_analysis_h5_to_xanos_format(task.combined_h5_path(), saxs_output_name=task.xanos_output_name(), force_saxs=True)
+    if not written:
+        raise RuntimeError("No stitched SAXS XAnos files were written.")
     progress(1.0, "Complete")
-    log(f"{task.task_name}: SAXS-only reduction complete; ASAXS/XAnos skipped -> {task.combined_h5_path()}")
+    log(f"{task.task_name}: SAXS-only reduction complete; XAnos files written -> {_xanos_written_dir(written)}")
+
+
+def _xanos_written_dir(written: list[Path]) -> Path | str:
+    for path in written:
+        if path.suffix.lower() == ".dat":
+            return path.parent
+    return written[0].parent if written else "unknown"
 
 
 def _output_inside_raw_problem(task: TaskSpec) -> str | None:
@@ -451,11 +479,6 @@ def _clear_detector_output_records(output_dir: Path) -> int:
             if path.is_file():
                 path.unlink()
                 removed += 1
-    for folder_name in ("XAnos format",):
-        folder = output_dir / folder_name
-        if folder.exists() and folder.is_dir():
-            shutil.rmtree(folder)
-            removed += 1
     return removed
 
 
@@ -518,31 +541,33 @@ def _clear_task_output_records(task: TaskSpec) -> int:
             if path.is_file():
                 path.unlink()
                 removed += 1
-    removed += _clear_current_pair_xanos_outputs(output_dir, task)
+    _ensure_current_pair_xanos_outputs_writable(output_dir, task)
     return removed
 
 
-def _clear_current_pair_xanos_outputs(output_dir: Path, task: TaskSpec) -> int:
-    """Remove only the XAnos export folders owned by the task's current pairs."""
+def _ensure_current_pair_xanos_outputs_writable(output_dir: Path, task: TaskSpec) -> None:
+    """Verify existing XAnos .dat exports can be overwritten on restart."""
     xanos_dir = output_dir / "XAnos format"
     if not xanos_dir.exists() or not xanos_dir.is_dir():
-        return 0
-    output_names = {_xanos_output_folder_name(pair.output_name) for pair in task.asaxs_pairs}
+        return
+    if task.is_asaxs_mode():
+        output_names = {_xanos_output_folder_name(pair.output_name) for pair in task.asaxs_pairs}
+    else:
+        output_names = {_xanos_output_folder_name(task.xanos_output_name() or task.task_name)}
     if not output_names:
-        return 0
-    removed = 0
+        return
     for output_name in sorted(output_names):
         folder = xanos_dir / output_name
         if folder.exists() and folder.is_dir():
-            shutil.rmtree(folder)
-            removed += 1
-    try:
-        next(xanos_dir.iterdir())
-    except StopIteration:
-        xanos_dir.rmdir()
-    except FileNotFoundError:
-        pass
-    return removed
+            _check_dat_files_writable(folder)
+
+
+def _check_dat_files_writable(folder: Path) -> None:
+    locked = [path for path in folder.rglob("*.dat") if path.is_file() and not os.access(path, os.W_OK)]
+    if locked:
+        examples = ", ".join(str(path) for path in locked[:3])
+        suffix = "" if len(locked) <= 3 else f", and {len(locked) - 3} more"
+        raise PermissionError(f"Cannot overwrite existing XAnos .dat file(s): {examples}{suffix}")
 
 
 def _xanos_output_folder_name(name: str) -> str:
