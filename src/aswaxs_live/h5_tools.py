@@ -2,17 +2,46 @@
 
 from __future__ import annotations
 
+import csv
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("QT_API", "pyqt5")
+
 import h5py
 import numpy as np
-import pyqtgraph as pg
-from PyQt5 import QtCore, QtWidgets
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 H5_FILTER = "HDF5 files (*.h5 *.hdf5);;All files (*)"
+IQ_VIEWER_INITIAL_SIZE = QtCore.QSize(1240, 900)
+IQ_VIEWER_MINIMUM_SIZE = QtCore.QSize(1120, 780)
+IQ_VIEWER_LEFT_WIDTH = 390
+IQ_VIEWER_PLOT_WIDTH = 850
+IQ_X_LABEL = r"$q$ ($\mathrm{\AA}^{-1}$)"
+IQ_Y_LABEL = r"$I(q)$ (a.u.)"
+PUBLICATION_COLORS = [
+    "#0072B2",  # blue
+    "#D55E00",  # vermillion
+    "#009E73",  # bluish green
+    "#CC79A7",  # reddish purple
+    "#E69F00",  # orange
+    "#56B4E9",  # sky blue
+    "#F0E442",  # yellow
+    "#000000",  # black
+]
+SOURCE_FILTERS = [
+    ("All data", "all"),
+    ("SAXS / Pil300K", "saxs"),
+    ("WAXS / Eig1M", "waxs"),
+    ("Combined / stitched", "combined"),
+]
 MAX_CURVE_ROWS_PER_GROUP = 250
 MAX_TREE_ITEMS = 6000
 MAX_ERROR_BAR_POINTS = 450
@@ -43,14 +72,30 @@ class H5CurveRecord:
     row: int | None
 
 
+@dataclass(frozen=True)
+class BackgroundCurve:
+    label: str
+    h5_path: str
+    record: H5CurveRecord
+    q: np.ndarray
+    intensity: np.ndarray
+    sigma: np.ndarray | None
+
+
 class H5IqViewerDialog(QtWidgets.QDialog):
     """Read-only HDF5 q-I curve viewer."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("HDF5 I-q Plot Viewer")
-        self.resize(1180, 760)
+        self.resize(IQ_VIEWER_INITIAL_SIZE)
+        self.setMinimumSize(IQ_VIEWER_MINIMUM_SIZE)
         self.curves: list[H5CurveRecord] = []
+        self.background_curve: BackgroundCurve | None = None
+        self.background_record_key: tuple[str, str, int | None] | None = None
+        self._background_pick_mode = False
+        self._saved_sample_selection: list[int] = []
+        self._plotted_points: list[tuple[np.ndarray, np.ndarray, str]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -74,67 +119,128 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         root.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
+        left.setMinimumWidth(420)
+        left.setMaximumWidth(600)
         left_layout = QtWidgets.QVBoxLayout(left)
-        controls = QtWidgets.QHBoxLayout()
+
+        source_row = QtWidgets.QHBoxLayout()
         self.filter_edit = QtWidgets.QLineEdit()
         self.filter_edit.setPlaceholderText("Filter curves, e.g. final, stitched, normalized, group_05")
         self.filter_edit.textChanged.connect(self._refill_curve_list)
+        self.source_combo = QtWidgets.QComboBox()
+        for label, value in SOURCE_FILTERS:
+            self.source_combo.addItem(label, value)
+        self.source_combo.currentIndexChanged.connect(self._refill_curve_list)
+        source_row.addWidget(QtWidgets.QLabel("Source"))
+        source_row.addWidget(self.source_combo, 1)
+        left_layout.addLayout(source_row)
+
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("Filter"))
+        filter_row.addWidget(self.filter_edit, 1)
+        left_layout.addLayout(filter_row)
+
+        display_row = QtWidgets.QHBoxLayout()
         self.log_q_check = QtWidgets.QCheckBox("log q")
         self.log_q_check.setChecked(True)
+        self.log_q_check.stateChanged.connect(self.plot_selected)
         self.log_i_check = QtWidgets.QCheckBox("log I")
         self.log_i_check.setChecked(True)
+        self.log_i_check.stateChanged.connect(self.plot_selected)
         self.error_check = QtWidgets.QCheckBox("errors")
         self.error_check.setChecked(True)
+        self.error_check.stateChanged.connect(self.plot_selected)
         self.max_curves_spin = QtWidgets.QSpinBox()
         self.max_curves_spin.setRange(1, 200)
         self.max_curves_spin.setValue(20)
+        self.max_curves_spin.valueChanged.connect(self.plot_selected)
+        display_row.addWidget(self.log_q_check)
+        display_row.addWidget(self.log_i_check)
+        display_row.addWidget(self.error_check)
+        display_row.addStretch(1)
+        display_row.addWidget(QtWidgets.QLabel("Max"))
+        display_row.addWidget(self.max_curves_spin)
+        left_layout.addLayout(display_row)
+
+        action_row = QtWidgets.QHBoxLayout()
         plot_button = QtWidgets.QPushButton("Plot Selected")
+        plot_button.setMinimumWidth(112)
         plot_button.clicked.connect(self.plot_selected)
-        controls.addWidget(QtWidgets.QLabel("Filter"))
-        controls.addWidget(self.filter_edit, 1)
-        controls.addWidget(self.log_q_check)
-        controls.addWidget(self.log_i_check)
-        controls.addWidget(self.error_check)
-        controls.addWidget(QtWidgets.QLabel("Max"))
-        controls.addWidget(self.max_curves_spin)
-        controls.addWidget(plot_button)
-        left_layout.addLayout(controls)
+        self.export_format_combo = QtWidgets.QComboBox()
+        self.export_format_combo.addItems(["CSV", "TXT"])
+        export_button = QtWidgets.QPushButton("Export Selected")
+        export_button.setMinimumWidth(122)
+        export_button.clicked.connect(self.export_selected_curves)
+        action_row.addWidget(plot_button)
+        action_row.addStretch(1)
+        action_row.addWidget(QtWidgets.QLabel("Export"))
+        action_row.addWidget(self.export_format_combo)
+        action_row.addWidget(export_button)
+        left_layout.addLayout(action_row)
 
         background_controls = QtWidgets.QHBoxLayout()
-        self.subtract_background_check = QtWidgets.QCheckBox("subtract background")
-        self.subtract_background_check.stateChanged.connect(self.plot_selected)
-        self.background_combo = QtWidgets.QComboBox()
-        self.background_combo.setMinimumContentsLength(28)
-        self.background_combo.currentIndexChanged.connect(self.plot_selected)
+        self.select_background_button = QtWidgets.QPushButton("Select Background")
+        self.select_background_button.setMinimumWidth(138)
+        self.select_background_button.clicked.connect(self.select_background)
+        clear_background_button = QtWidgets.QPushButton("Clear Background")
+        clear_background_button.setMinimumWidth(132)
+        clear_background_button.clicked.connect(self.clear_background)
         self.background_factor_spin = QtWidgets.QDoubleSpinBox()
         self.background_factor_spin.setRange(-1000.0, 1000.0)
         self.background_factor_spin.setDecimals(5)
         self.background_factor_spin.setSingleStep(0.01)
-        self.background_factor_spin.setValue(1.0)
+        self.background_factor_spin.setValue(0.99)
         self.background_factor_spin.valueChanged.connect(self.plot_selected)
-        background_controls.addWidget(self.subtract_background_check)
-        background_controls.addWidget(QtWidgets.QLabel("Background"))
-        background_controls.addWidget(self.background_combo, 1)
+        self.background_label = QtWidgets.QLabel("No background selected.")
+        self.background_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.background_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.background_label.setMinimumHeight(self.background_label.sizeHint().height())
+        background_controls.addWidget(self.select_background_button)
+        background_controls.addWidget(clear_background_button)
+        background_controls.addStretch(1)
         background_controls.addWidget(QtWidgets.QLabel("Factor"))
         background_controls.addWidget(self.background_factor_spin)
         left_layout.addLayout(background_controls)
 
+        background_label_row = QtWidgets.QHBoxLayout()
+        background_label_row.addWidget(self.background_label, 1)
+        left_layout.addLayout(background_label_row)
+
         self.curve_list = QtWidgets.QListWidget()
         self.curve_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.curve_list.itemClicked.connect(self._maybe_set_clicked_background)
         self.curve_list.itemDoubleClicked.connect(lambda _item: self.plot_selected())
         left_layout.addWidget(self.curve_list, 1)
         self.status_label = QtWidgets.QLabel("Choose an analysis HDF5 file.")
+        self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.status_label.setMinimumHeight(self.status_label.sizeHint().height())
         left_layout.addWidget(self.status_label)
         splitter.addWidget(left)
 
-        self.plot = pg.PlotWidget()
-        self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("bottom", "q")
-        self.plot.setLabel("left", "I")
-        self.legend = self.plot.addLegend(offset=(8, 8))
-        self.plot.getPlotItem().setDownsampling(auto=True, mode="peak")
-        self.plot.getPlotItem().setClipToView(True)
-        splitter.addWidget(self.plot)
+        plot_panel = QtWidgets.QWidget()
+        plot_panel.setMinimumSize(720, 720)
+        plot_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        plot_layout = QtWidgets.QVBoxLayout(plot_panel)
+        self.figure = Figure(figsize=(7.2, 7.2), dpi=110)
+        self.figure.subplots_adjust(left=0.13, right=0.98, bottom=0.12, top=0.97)
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setMinimumSize(720, 720)
+        self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.ax = self.figure.add_subplot(111)
+        _apply_iq_axes_style(self.ax)
+        self.coordinate_label = QtWidgets.QLabel("q: -, I: -")
+        self.coordinate_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.coordinate_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.coordinate_label.setMinimumHeight(self.coordinate_label.sizeHint().height())
+        self.coordinate_label.setMaximumHeight(self.coordinate_label.sizeHint().height() + 4)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas, 1)
+        plot_layout.addWidget(self.coordinate_label)
+        self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
+        splitter.addWidget(plot_panel)
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([max(IQ_VIEWER_LEFT_WIDTH, 430), IQ_VIEWER_PLOT_WIDTH])
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
 
@@ -175,116 +281,226 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         except Exception as exc:  # noqa: BLE001 - show GUI-friendly error.
             self.status_label.setText(f"Could not read HDF5: {exc}")
             return
-        self._refill_background_combo()
         self._refill_curve_list(select_first=True)
         source_text = f" in {len(h5_paths)} HDF5 file(s)" if path.is_dir() else ""
         self.status_label.setText(f"Found {len(self.curves)} plottable q-data rows{source_text}.")
         self.plot_selected()
 
-    def _refill_background_combo(self) -> None:
-        previous_index = self.background_combo.currentData()
-        self.background_combo.blockSignals(True)
-        self.background_combo.clear()
-        self.background_combo.addItem("(none)", None)
-        for index, curve in enumerate(self.curves):
-            self.background_combo.addItem(curve.label, index)
-        if previous_index is not None:
-            match = self.background_combo.findData(previous_index)
-            if match >= 0:
-                self.background_combo.setCurrentIndex(match)
-        self.background_combo.blockSignals(False)
-
     def _refill_curve_list(self, select_first: bool = False) -> None:
+        if not isinstance(select_first, bool):
+            select_first = False
         needle = self.filter_edit.text().strip().lower()
+        source = self.source_combo.currentData() or "all"
         self.curve_list.clear()
         for index, curve in enumerate(self.curves):
+            if not _curve_matches_source(curve, source):
+                continue
             if needle and needle not in curve.label.lower() and needle not in curve.group_path.lower():
                 continue
             item = QtWidgets.QListWidgetItem(curve.label)
             item.setData(QtCore.Qt.UserRole, index)
+            self._style_curve_list_item(item, curve)
             self.curve_list.addItem(item)
         if select_first:
             for row in range(min(self.curve_list.count(), self.max_curves_spin.value())):
                 self.curve_list.item(row).setSelected(True)
 
-    def plot_selected(self) -> None:
-        self.plot.clear()
-        self.legend.clear()
-        self.plot.setLogMode(x=self.log_q_check.isChecked(), y=self.log_i_check.isChecked())
+    def select_background(self) -> None:
+        self._saved_sample_selection = self._selected_curve_indices()
+        self._background_pick_mode = True
+        self.select_background_button.setText("Click background curve...")
+        self.status_label.setText("Click one curve in the left list to mark it as the background.")
+
+    def clear_background(self) -> None:
+        self.background_curve = None
+        self.background_record_key = None
+        self._background_pick_mode = False
+        self.select_background_button.setText("Select Background")
+        self.background_label.setText("No background selected.")
+        self._refresh_curve_list_marks()
+        self.plot_selected()
+
+    def _maybe_set_clicked_background(self, item: QtWidgets.QListWidgetItem) -> None:
+        if not self._background_pick_mode:
+            return
+        value = item.data(QtCore.Qt.UserRole)
+        if value is None:
+            return
+        self._set_background_from_record_index(int(value))
+        self._restore_sample_selection()
+        self._background_pick_mode = False
+        self.select_background_button.setText("Select Background")
+        self.plot_selected()
+
+    def _set_background_from_record_index(self, record_index: int) -> None:
         path = Path(self.path_edit.text().strip())
-        selected = [self.curve_list.item(index.row()).data(QtCore.Qt.UserRole) for index in self.curve_list.selectedIndexes()]
+        record = self.curves[record_index]
+        h5_path = Path(record.h5_path) if record.h5_path else path
+        try:
+            q, intensity, sigma = _read_curve_from_h5_path(h5_path, record)
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not set background curve: {exc}")
+            return
+        self.background_record_key = _record_key(record)
+        self.background_curve = BackgroundCurve(
+            label=f"{h5_path.name} | {record.label}",
+            h5_path=str(h5_path),
+            record=record,
+            q=q,
+            intensity=intensity,
+            sigma=sigma,
+        )
+        self.background_label.setText(f"Background: {self.background_curve.label}")
+        self._refresh_curve_list_marks()
+
+    def _restore_sample_selection(self) -> None:
+        self.curve_list.blockSignals(True)
+        self.curve_list.clearSelection()
+        saved = set(self._saved_sample_selection)
+        for row in range(self.curve_list.count()):
+            item = self.curve_list.item(row)
+            record_index = item.data(QtCore.Qt.UserRole)
+            if record_index in saved and not self._is_background_record(self.curves[int(record_index)]):
+                item.setSelected(True)
+        self.curve_list.blockSignals(False)
+
+    def _refresh_curve_list_marks(self) -> None:
+        for row in range(self.curve_list.count()):
+            item = self.curve_list.item(row)
+            record_index = item.data(QtCore.Qt.UserRole)
+            if record_index is None:
+                continue
+            self._style_curve_list_item(item, self.curves[int(record_index)])
+
+    def _is_background_record(self, curve: H5CurveRecord) -> bool:
+        return self.background_record_key is not None and _record_key(curve) == self.background_record_key
+
+    def _style_curve_list_item(self, item: QtWidgets.QListWidgetItem, curve: H5CurveRecord) -> None:
+        label = curve.label
+        item.setBackground(QtGui.QBrush())
+        item.setToolTip(curve.label)
+        if self._is_background_record(curve):
+            label = f"[BG] {curve.label}"
+            item.setBackground(QtGui.QColor("#fff2a8"))
+            item.setToolTip(f"Background curve\n{curve.label}")
+        item.setText(label)
+
+    def plot_selected(self) -> None:
+        self.ax.clear()
+        self._plotted_points = []
+        self.coordinate_label.setText("q: -, I: -")
+        path = Path(self.path_edit.text().strip())
+        selected = self._selected_curve_indices()
         selected = selected[: self.max_curves_spin.value()]
         if not selected:
             self.status_label.setText("Select one or more curves to plot.")
+            _apply_iq_axes_style(self.ax)
+            self.canvas.draw_idle()
             return
-        background = None
-        if self.subtract_background_check.isChecked():
-            background = self._background_curve_data(path)
-            if background is None:
-                self.status_label.setText("Choose one background curve before plotting background subtraction.")
-                return
+        background = self._background_curve_data()
         plotted = 0
         try:
             for record_index in selected:
-                record = self.curves[record_index]
-                h5_path = Path(record.h5_path) if record.h5_path else path
-                with h5py.File(h5_path, "r") as handle:
-                    q, intensity, sigma = read_curve_row(handle, record)
-                    q = np.asarray(q, dtype=float).reshape(-1)
-                    intensity = np.asarray(intensity, dtype=float).reshape(-1)
-                    n = min(q.size, intensity.size)
-                    q = q[:n]
-                    intensity = intensity[:n]
-                    if sigma is not None:
-                        sigma = np.asarray(sigma, dtype=float).reshape(-1)[:n]
-                    label = record.label
-                    if background is not None:
-                        q, intensity, sigma = _subtract_background_curve(
-                            q,
-                            intensity,
-                            sigma,
-                            background[0],
-                            background[1],
-                            background[2],
-                            self.background_factor_spin.value(),
-                        )
-                        label = f"{record.label} - {self.background_factor_spin.value():.5g} x {background[3]}"
-                    mask = np.isfinite(q) & np.isfinite(intensity)
-                    if self.log_q_check.isChecked():
-                        mask &= q > 0
-                    if self.log_i_check.isChecked():
-                        mask &= intensity > 0
-                    if np.count_nonzero(mask) < 2:
-                        continue
-                    pen = pg.mkPen(pg.intColor(plotted, hues=max(8, len(selected))), width=1.4)
-                    self.plot.plot(q[mask], intensity[mask], pen=pen, name=label)
-                    if self.error_check.isChecked() and sigma is not None:
-                        self._plot_error_bars(q, intensity, sigma, mask, pen)
-                    plotted += 1
+                q, intensity, sigma, label, _record = self._prepared_curve_data(record_index, path, background)
+                mask = _plot_mask(q, intensity, self.log_q_check.isChecked(), self.log_i_check.isChecked())
+                if np.count_nonzero(mask) < 2:
+                    continue
+                color = _publication_color(plotted, max(1, len(selected)))
+                self.ax.plot(q[mask], intensity[mask], linewidth=1.4, color=color, label=label)
+                self._plotted_points.append((q[mask], intensity[mask], label))
+                if self.error_check.isChecked() and sigma is not None:
+                    self._plot_error_bars(q, intensity, sigma, mask, color)
+                plotted += 1
         except Exception as exc:  # noqa: BLE001
             self.status_label.setText(f"Could not plot selected curves: {exc}")
             return
+        self.ax.set_xscale("log" if self.log_q_check.isChecked() else "linear")
+        self.ax.set_yscale("log" if self.log_i_check.isChecked() else "linear")
+        _apply_iq_axes_style(self.ax)
+        if plotted:
+            legend = self.ax.legend(fontsize=8, loc="best")
+            if legend is not None:
+                legend.set_draggable(True)
+        self.canvas.draw_idle()
         suffix = " with background subtraction" if background is not None else ""
         self.status_label.setText(f"Plotted {plotted}/{len(selected)} selected curves{suffix}.")
 
-    def _background_curve_data(self, default_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str] | None:
-        record_index = self.background_combo.currentData()
-        if record_index is None or not (0 <= int(record_index) < len(self.curves)):
-            return None
-        record = self.curves[int(record_index)]
-        h5_path = Path(record.h5_path) if record.h5_path else default_path
-        with h5py.File(h5_path, "r") as handle:
-            q, intensity, sigma = read_curve_row(handle, record)
-        q = np.asarray(q, dtype=float).reshape(-1)
-        intensity = np.asarray(intensity, dtype=float).reshape(-1)
-        n = min(q.size, intensity.size)
-        q = q[:n]
-        intensity = intensity[:n]
-        if sigma is not None:
-            sigma = np.asarray(sigma, dtype=float).reshape(-1)[:n]
-        return q, intensity, sigma, record.label
+    def export_selected_curves(self) -> None:
+        path = Path(self.path_edit.text().strip())
+        selected = self._selected_curve_indices()
+        if not selected:
+            self.status_label.setText("Select one or more curves to export.")
+            return
+        background = self._background_curve_data()
+        extension = ".csv" if self.export_format_combo.currentText().upper() == "CSV" else ".txt"
+        if len(selected) == 1:
+            default_name = _safe_filename(self.curves[selected[0]].label) + extension
+            file_filter = "CSV files (*.csv);;Text files (*.txt)" if extension == ".csv" else "Text files (*.txt);;CSV files (*.csv)"
+            target, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export selected I-q data", str(path.parent / default_name), file_filter)
+            if not target:
+                return
+            targets = [Path(target)]
+        else:
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export selected I-q data to folder", str(path.parent))
+            if not folder:
+                return
+            targets = [Path(folder) / (_safe_filename(self.curves[index].label) + extension) for index in selected]
+        try:
+            for record_index, target in zip(selected, targets, strict=True):
+                q, intensity, sigma, label, record = self._prepared_curve_data(record_index, path, background)
+                _write_curve_export(
+                    target,
+                    q,
+                    intensity,
+                    sigma,
+                    label=label,
+                    record=record,
+                    background_label=background[3] if background is not None else None,
+                    background_factor=self.background_factor_spin.value() if background is not None else None,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not export selected curves: {exc}")
+            return
+        self.status_label.setText(f"Exported {len(targets)} selected curve(s).")
 
-    def _plot_error_bars(self, q: np.ndarray, intensity: np.ndarray, sigma: np.ndarray, mask: np.ndarray, pen: pg.mkPen) -> None:
+    def _selected_curve_indices(self) -> list[int]:
+        rows = sorted({index.row() for index in self.curve_list.selectedIndexes()})
+        return [int(self.curve_list.item(row).data(QtCore.Qt.UserRole)) for row in rows]
+
+    def _prepared_curve_data(
+        self,
+        record_index: int,
+        default_path: Path,
+        background: tuple[np.ndarray, np.ndarray, np.ndarray | None, str] | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str, H5CurveRecord]:
+        record = self.curves[record_index]
+        h5_path = Path(record.h5_path) if record.h5_path else default_path
+        q, intensity, sigma = _read_curve_from_h5_path(h5_path, record)
+        label = record.label
+        if background is not None:
+            q, intensity, sigma = _subtract_background_curve(
+                q,
+                intensity,
+                sigma,
+                background[0],
+                background[1],
+                background[2],
+                self.background_factor_spin.value(),
+            )
+            label = f"{record.label} - {self.background_factor_spin.value():.5g} x {background[3]}"
+        return q, intensity, sigma, label, record
+
+    def _background_curve_data(self) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str] | None:
+        if self.background_curve is None:
+            return None
+        return (
+            self.background_curve.q,
+            self.background_curve.intensity,
+            self.background_curve.sigma,
+            self.background_curve.label,
+        )
+
+    def _plot_error_bars(self, q: np.ndarray, intensity: np.ndarray, sigma: np.ndarray, mask: np.ndarray, color: str) -> None:
         sigma_mask = mask & np.isfinite(sigma) & (sigma >= 0)
         if np.count_nonzero(sigma_mask) < 2:
             return
@@ -296,7 +512,20 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             x = x[indices]
             y = y[indices]
             err = err[indices]
-        self.plot.addItem(pg.ErrorBarItem(x=x, y=y, top=err, bottom=err, beam=0.0, pen=pen))
+        self.ax.errorbar(x, y, yerr=err, fmt="none", ecolor=color, alpha=0.35, linewidth=0.7, capsize=0)
+
+    def _on_plot_motion(self, event: Any) -> None:
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            self.coordinate_label.setText("q: -, I: -")
+            return
+        nearest = _nearest_plotted_point(event.xdata, event.ydata, self._plotted_points)
+        if nearest is None:
+            self.coordinate_label.setText(f"q: {event.xdata:.6g}, I: {event.ydata:.6g}")
+            return
+        q_value, i_value, label = nearest
+        self.coordinate_label.setText(
+            f"cursor q: {event.xdata:.6g}, I: {event.ydata:.6g} | nearest q: {q_value:.6g}, I: {i_value:.6g} ({label})"
+        )
 
 
 class H5StructureViewerDialog(QtWidgets.QDialog):
@@ -477,6 +706,140 @@ def read_curve_row(handle: h5py.File, record: H5CurveRecord) -> tuple[np.ndarray
         if q.ndim == 2:
             q = q[record.row if record.row < q.shape[0] else 0]
     return q, intensity, sigma
+
+
+def _read_curve_from_h5_path(h5_path: Path, record: H5CurveRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    with h5py.File(h5_path, "r") as handle:
+        q, intensity, sigma = read_curve_row(handle, record)
+    q = np.asarray(q, dtype=float).reshape(-1)
+    intensity = np.asarray(intensity, dtype=float).reshape(-1)
+    n = min(q.size, intensity.size)
+    q = q[:n]
+    intensity = intensity[:n]
+    if sigma is not None:
+        sigma = np.asarray(sigma, dtype=float).reshape(-1)[:n]
+    return q, intensity, sigma
+
+
+def _record_key(record: H5CurveRecord) -> tuple[str, str, int | None]:
+    return (record.h5_path or "", record.i_path, record.row)
+
+
+def _curve_matches_source(record: H5CurveRecord, source: str) -> bool:
+    if source == "all":
+        return True
+    text = " ".join(
+        value.lower()
+        for value in (
+            record.label,
+            record.group_path,
+            record.q_path,
+            record.i_path,
+            record.h5_path or "",
+        )
+    )
+    if source == "saxs":
+        return any(token in text for token in ("pil300k", "saxs")) and not _curve_matches_source(record, "combined")
+    if source == "waxs":
+        return any(token in text for token in ("eig1m", "eiger", "waxs")) and not _curve_matches_source(record, "combined")
+    if source == "combined":
+        return any(token in text for token in ("stitched", "combined", "asaxs_outputs", "/final/", "final /", "legacy final"))
+    return True
+
+
+def _plot_mask(q: np.ndarray, intensity: np.ndarray, log_q: bool, log_i: bool) -> np.ndarray:
+    mask = np.isfinite(q) & np.isfinite(intensity)
+    if log_q:
+        mask &= q > 0
+    if log_i:
+        mask &= intensity > 0
+    return mask
+
+
+def _apply_iq_axes_style(ax: Any) -> None:
+    ax.set_xlabel(IQ_X_LABEL)
+    ax.set_ylabel(IQ_Y_LABEL)
+    ax.grid(True, which="major", color="#d0d0d0", linewidth=0.7, alpha=0.75)
+    ax.grid(True, which="minor", color="#e8e8e8", linewidth=0.45, alpha=0.55)
+    ax.tick_params(which="both", direction="in", top=True, right=True)
+    try:
+        ax.set_box_aspect(1)
+    except AttributeError:
+        pass
+
+
+def _publication_color(index: int, total: int) -> str:
+    if total <= len(PUBLICATION_COLORS):
+        return PUBLICATION_COLORS[index % len(PUBLICATION_COLORS)]
+    try:
+        from matplotlib import colormaps
+
+        return colormaps["viridis"](index / max(1, total - 1))
+    except Exception:  # noqa: BLE001 - color fallback should never break plotting.
+        return PUBLICATION_COLORS[index % len(PUBLICATION_COLORS)]
+
+
+def _nearest_plotted_point(
+    q_value: float,
+    i_value: float,
+    plotted_points: list[tuple[np.ndarray, np.ndarray, str]],
+) -> tuple[float, float, str] | None:
+    best: tuple[float, float, str] | None = None
+    best_distance = np.inf
+    for q, intensity, label in plotted_points:
+        if q.size == 0:
+            continue
+        distances = (q - q_value) ** 2 + (intensity - i_value) ** 2
+        if not distances.size:
+            continue
+        index = int(np.nanargmin(distances))
+        distance = float(distances[index])
+        if distance < best_distance:
+            best_distance = distance
+            best = (float(q[index]), float(intensity[index]), label)
+    return best
+
+
+def _safe_filename(label: str, max_length: int = 120) -> str:
+    text = re.sub(r"[^\w.\-]+", "_", label.strip(), flags=re.ASCII).strip("._")
+    return (text or "curve")[:max_length]
+
+
+def _write_curve_export(
+    path: Path,
+    q: np.ndarray,
+    intensity: np.ndarray,
+    sigma: np.ndarray | None,
+    *,
+    label: str,
+    record: H5CurveRecord,
+    background_label: str | None,
+    background_factor: float | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    delimiter = "," if path.suffix.lower() == ".csv" else "\t"
+    sigma_values = sigma if sigma is not None else np.full_like(q, np.nan, dtype=float)
+    n = min(q.size, intensity.size, sigma_values.size)
+    rows = zip(q[:n], intensity[:n], sigma_values[:n], strict=True)
+    header_lines = [
+        f"# label: {label}",
+        f"# group_path: {record.group_path}",
+        f"# q_path: {record.q_path}",
+        f"# i_path: {record.i_path}",
+    ]
+    if record.sigma_path:
+        header_lines.append(f"# sigma_path: {record.sigma_path}")
+    if record.h5_path:
+        header_lines.append(f"# source_h5: {record.h5_path}")
+    if background_label is not None and background_factor is not None:
+        header_lines.append(f"# background: {background_factor:.8g} x {background_label}")
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        for line in header_lines:
+            handle.write(line + "\n")
+        writer = csv.writer(handle, delimiter=delimiter)
+        writer.writerow(["q", "I", "sigma_I"])
+        for row in rows:
+            writer.writerow([f"{float(row[0]):.10g}", f"{float(row[1]):.10g}", f"{float(row[2]):.10g}"])
 
 
 def _subtract_background_curve(
@@ -675,6 +1038,8 @@ def _curve_y_datasets(group: h5py.Group, q_dataset: h5py.Dataset) -> list[tuple[
     for name in sorted(group.keys(), key=_y_dataset_sort_key):
         if group[name].name == q_dataset.name:
             continue
+        if _is_error_dataset_name(name):
+            continue
         child = group[name]
         if not isinstance(child, h5py.Dataset) or not _is_numeric_dataset(child):
             continue
@@ -743,6 +1108,11 @@ def _matching_sigma_path(group: h5py.Group, y_name: str, y_shape: tuple[int, ...
         if isinstance(child, h5py.Dataset) and _is_numeric_dataset(child) and child.shape == y_shape:
             return child.name
     return None
+
+
+def _is_error_dataset_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in {"sigma", "sigma_i", "i_error", "error", "errors"} or lowered.startswith(("sigma_", "error_"))
 
 
 def _y_dataset_sort_key(name: str) -> tuple[int, str]:

@@ -373,16 +373,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(page, "Dashboard")
 
     def _build_current_curves_panel(self) -> QtWidgets.QGroupBox:
-        curve_box = QtWidgets.QGroupBox("Current Reduced Curves")
+        curve_box = QtWidgets.QGroupBox("Final Reduced Curves")
         layout = QtWidgets.QVBoxLayout(curve_box)
         controls = QtWidgets.QHBoxLayout()
         layout.addLayout(controls)
 
-        self.curve_source_combo = QtWidgets.QComboBox()
-        self.curve_source_combo.addItems(["Auto", "Final ASAXS", "Stitched Averages"])
-        self.curve_source_combo.currentIndexChanged.connect(self.refresh_current_curves)
-        controls.addWidget(QtWidgets.QLabel("Source"))
-        controls.addWidget(self.curve_source_combo)
+        source_label = QtWidgets.QLabel("Source: final data only")
+        source_label.setStyleSheet("color: #444;")
+        controls.addWidget(source_label)
 
         self.curve_max_spin = QtWidgets.QSpinBox()
         self.curve_max_spin.setRange(1, 100)
@@ -408,14 +406,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
         self.current_curve_plot = pg.PlotWidget()
         self.current_curve_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.current_curve_plot.setLabel("bottom", "q")
-        self.current_curve_plot.setLabel("left", "I")
+        self.current_curve_plot.setLabel("bottom", "q", units="A^-1")
+        self.current_curve_plot.setLabel("left", "I(q)", units="a.u.")
         self.current_curve_legend = self.current_curve_plot.addLegend(offset=(8, 8))
         self.current_curve_plot.getPlotItem().setDownsampling(auto=True, mode="peak")
         self.current_curve_plot.getPlotItem().setClipToView(True)
         layout.addWidget(self.current_curve_plot, 1)
 
-        self.current_curve_status = QtWidgets.QLabel("Select a task to show reduced curves.")
+        self.current_curve_status = QtWidgets.QLabel("Select a task to show final reduced curves.")
         layout.addWidget(self.current_curve_status)
         return curve_box
 
@@ -1248,12 +1246,12 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.current_curve_plot.clear()
         self.current_curve_legend.clear()
         self.current_curve_plot.setLogMode(x=self.curve_log_x_check.isChecked(), y=self.curve_log_y_check.isChecked())
-        self.current_curve_plot.setLabel("bottom", "q")
-        self.current_curve_plot.setLabel("left", "I")
+        self.current_curve_plot.setLabel("bottom", "q", units="A^-1")
+        self.current_curve_plot.setLabel("left", "I(q)", units="a.u.")
         index = self.selected_index()
         if index is None:
             self.current_curve_plot.setTitle("No task selected")
-            self.current_curve_status.setText("Select a task to show reduced curves.")
+            self.current_curve_status.setText("Select a task to show final reduced curves.")
             return
         task = self.tasks[index]
         try:
@@ -1263,8 +1261,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.current_curve_status.setText(str(exc))
             return
         if not curves:
-            self.current_curve_plot.setTitle("Waiting for reduced curves")
-            self.current_curve_status.setText(f"No reduced curves found yet for {task.task_name}.")
+            self.current_curve_plot.setTitle("Waiting for final reduced curves")
+            self.current_curve_status.setText(f"No final reduced curves found yet for {task.task_name}.")
             return
         plotted = 0
         for label, q, intensity in curves:
@@ -1288,17 +1286,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         analysis_h5 = self._find_task_analysis_h5(task)
         if analysis_h5 is None:
             return [], "No analysis HDF5", task.combined_h5_path()
-        source = self.curve_source_combo.currentText()
         with h5py.File(analysis_h5, "r") as handle:
-            if source in {"Auto", "Final ASAXS"}:
-                curves = self._read_final_curve_payloads(handle)
-                if curves or source == "Final ASAXS":
-                    return curves[: self.curve_max_spin.value()], "Final ASAXS", analysis_h5
-            curves = self._read_stitched_curve_payloads(handle)
-            if curves:
-                return curves[: self.curve_max_spin.value()], "Stitched Averages", analysis_h5
-            curves = self._read_detector_reduction_payloads(handle)
-            return curves[: self.curve_max_spin.value()], "Detector Averages", analysis_h5
+            curves = self._read_final_curve_payloads(handle, include_saxs_final=task.is_saxs_mode())
+            source_label = "Final SAXS" if task.is_saxs_mode() else "Final ASAXS"
+            return curves[: self.curve_max_spin.value()], source_label, analysis_h5
 
     def _find_task_analysis_h5(self, task: TaskSpec) -> Path | None:
         expected = task.combined_h5_path()
@@ -1307,7 +1298,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         candidates = sorted(task.output_path.glob("*_analysis.h5"), key=lambda path: path.stat().st_mtime_ns if path.exists() else 0)
         return candidates[-1] if candidates else None
 
-    def _read_final_curve_payloads(self, handle: h5py.File) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    def _read_final_curve_payloads(self, handle: h5py.File, include_saxs_final: bool = False) -> list[tuple[str, np.ndarray, np.ndarray]]:
         curves: list[tuple[str, np.ndarray, np.ndarray]] = []
         named = handle.get("/entry/asaxs_outputs")
         if isinstance(named, h5py.Group):
@@ -1317,7 +1308,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         if curves:
             return curves
         group = handle.get("/entry/final/corrected_I_q_E")
-        return self._rows_from_q_i_group(group, "final")
+        curves = self._rows_from_q_i_group(group, "final")
+        if curves or not include_saxs_final:
+            return curves
+        return self._read_stitched_curve_payloads(handle)
 
     def _read_stitched_curve_payloads(self, handle: h5py.File) -> list[tuple[str, np.ndarray, np.ndarray]]:
         root = handle.get("/entry/stitched_averages/curves")
