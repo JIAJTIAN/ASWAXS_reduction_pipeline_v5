@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from aswaxs_live.h5_tools import H5CurveRecord, _curve_matches_source, _safe_filename, _write_curve_export, discover_iq_curves
+from aswaxs_live.h5_tools import H5CurveRecord, _curve_matches_source, _safe_filename, _subtract_background_curve, _write_curve_export, discover_iq_curves
 
 
 def _record(label: str, group_path: str, h5_path: str = "") -> H5CurveRecord:
@@ -70,3 +70,26 @@ def test_discover_iq_curves_uses_sigma_as_error_not_curve(tmp_path: Path) -> Non
     assert len(curves) == 1
     assert curves[0].i_path.endswith("/I")
     assert curves[0].sigma_path.endswith("/sigma_I")
+
+
+def test_pair_subtraction_interpolates_background_and_propagates_error() -> None:
+    q = np.array([1.0, 2.0, 3.0])
+    intensity = np.array([10.0, 20.0, 30.0])
+    sigma = np.array([1.0, 1.0, 1.0])
+    background_q = np.array([1.0, 3.0])
+    background_i = np.array([2.0, 6.0])
+    background_sigma = np.array([0.5, 1.5])
+
+    corrected_q, corrected_i, corrected_sigma = _subtract_background_curve(
+        q,
+        intensity,
+        sigma,
+        background_q,
+        background_i,
+        background_sigma,
+        factor=0.5,
+    )
+
+    np.testing.assert_allclose(corrected_q, q)
+    np.testing.assert_allclose(corrected_i, [9.0, 18.0, 27.0])
+    np.testing.assert_allclose(corrected_sigma, np.sqrt([1.0**2 + 0.25**2, 1.0**2 + 0.5**2, 1.0**2 + 0.75**2]))

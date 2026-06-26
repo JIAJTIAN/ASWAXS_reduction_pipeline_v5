@@ -210,7 +210,48 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         self.curve_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.curve_list.itemClicked.connect(self._maybe_set_clicked_background)
         self.curve_list.itemDoubleClicked.connect(lambda _item: self.plot_selected())
-        left_layout.addWidget(self.curve_list, 1)
+        left_layout.addWidget(self.curve_list, 2)
+
+        pair_label = QtWidgets.QLabel("Sample - background pairs")
+        pair_label.setStyleSheet("font-weight: bold;")
+        left_layout.addWidget(pair_label)
+        self.pair_table = QtWidgets.QTableWidget(0, 4)
+        self.pair_table.setHorizontalHeaderLabels(["Output name", "Sample", "Background", "Factor"])
+        self.pair_table.horizontalHeader().setStretchLastSection(False)
+        self.pair_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.pair_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.pair_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.pair_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        self.pair_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.pair_table.setMaximumHeight(150)
+        left_layout.addWidget(self.pair_table)
+
+        pair_row_1 = QtWidgets.QHBoxLayout()
+        add_pair = QtWidgets.QPushButton("Add Pair")
+        add_pair.setToolTip("Select sample and background curves, then add them as one subtraction pair.")
+        add_pair.clicked.connect(self.add_pair_from_selection)
+        remove_pair = QtWidgets.QPushButton("Remove Pair")
+        remove_pair.clicked.connect(self.remove_selected_pairs)
+        clear_pairs = QtWidgets.QPushButton("Clear Pairs")
+        clear_pairs.clicked.connect(self.clear_pair_rows)
+        pair_row_1.addWidget(add_pair)
+        pair_row_1.addWidget(remove_pair)
+        pair_row_1.addWidget(clear_pairs)
+        pair_row_1.addStretch(1)
+        left_layout.addLayout(pair_row_1)
+
+        pair_row_2 = QtWidgets.QHBoxLayout()
+        plot_pairs = QtWidgets.QPushButton("Plot Pair Outputs")
+        plot_pairs.setMinimumWidth(130)
+        plot_pairs.clicked.connect(self.plot_pair_outputs)
+        export_pairs = QtWidgets.QPushButton("Export Pair Outputs")
+        export_pairs.setMinimumWidth(140)
+        export_pairs.clicked.connect(self.export_pair_outputs)
+        pair_row_2.addWidget(plot_pairs)
+        pair_row_2.addWidget(export_pairs)
+        pair_row_2.addStretch(1)
+        left_layout.addLayout(pair_row_2)
+
         self.status_label = QtWidgets.QLabel("Choose an analysis HDF5 file.")
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.status_label.setMinimumHeight(self.status_label.sizeHint().height())
@@ -463,9 +504,176 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             return
         self.status_label.setText(f"Exported {len(targets)} selected curve(s).")
 
+    def add_pair_from_selection(self) -> None:
+        selected = self._selected_curve_indices()
+        if self.background_record_key is not None:
+            background_index = self._curve_index_for_key(self.background_record_key)
+            if background_index is None:
+                self.status_label.setText("Marked background is not visible in the current list.")
+                return
+            sample_candidates = [index for index in selected if index != background_index]
+            if not sample_candidates:
+                self.status_label.setText("Select at least one sample curve that is not the marked background.")
+                return
+            sample_index = sample_candidates[0]
+        elif len(selected) >= 2:
+            current_item = self.curve_list.currentItem()
+            current_index = current_item.data(QtCore.Qt.UserRole) if current_item is not None else None
+            sample_index = int(current_index) if current_index in selected else selected[0]
+            background_candidates = [index for index in selected if index != sample_index]
+            background_index = background_candidates[0]
+        else:
+            self.status_label.setText("Select sample and background curves, or select a sample and mark one background.")
+            return
+        if sample_index == background_index:
+            self.status_label.setText("Sample and background curve must be different.")
+            return
+        self._append_pair_row(sample_index, background_index)
+        self.status_label.setText("Added one sample-background pair.")
+
+    def remove_selected_pairs(self) -> None:
+        rows = sorted({index.row() for index in self.pair_table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            self.pair_table.removeRow(row)
+
+    def clear_pair_rows(self) -> None:
+        self.pair_table.setRowCount(0)
+
+    def plot_pair_outputs(self) -> None:
+        self.ax.clear()
+        self._plotted_points = []
+        self.coordinate_label.setText("q: -, I: -")
+        try:
+            payloads = self._pair_curve_payloads()
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not build pair outputs: {exc}")
+            return
+        if not payloads:
+            self.status_label.setText("Add one or more sample-background pairs first.")
+            _apply_iq_axes_style(self.ax)
+            self.canvas.draw_idle()
+            return
+        plotted = 0
+        for label, q, intensity, sigma, _record, _background_label, _factor in payloads:
+            mask = _plot_mask(q, intensity, self.log_q_check.isChecked(), self.log_i_check.isChecked())
+            if np.count_nonzero(mask) < 2:
+                continue
+            color = _publication_color(plotted, max(1, len(payloads)))
+            self.ax.plot(q[mask], intensity[mask], linewidth=1.4, color=color, label=label)
+            self._plotted_points.append((q[mask], intensity[mask], label))
+            if self.error_check.isChecked() and sigma is not None:
+                self._plot_error_bars(q, intensity, sigma, mask, color)
+            plotted += 1
+        self.ax.set_xscale("log" if self.log_q_check.isChecked() else "linear")
+        self.ax.set_yscale("log" if self.log_i_check.isChecked() else "linear")
+        _apply_iq_axes_style(self.ax)
+        if plotted:
+            legend = self.ax.legend(fontsize=8, loc="best")
+            if legend is not None:
+                legend.set_draggable(True)
+        self.canvas.draw_idle()
+        self.status_label.setText(f"Plotted {plotted}/{len(payloads)} pair-subtracted output(s).")
+
+    def export_pair_outputs(self) -> None:
+        try:
+            payloads = self._pair_curve_payloads()
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not build pair outputs: {exc}")
+            return
+        if not payloads:
+            self.status_label.setText("Add one or more sample-background pairs first.")
+            return
+        path = Path(self.path_edit.text().strip())
+        extension = ".csv" if self.export_format_combo.currentText().upper() == "CSV" else ".txt"
+        if len(payloads) == 1:
+            default_name = _safe_filename(payloads[0][0]) + extension
+            file_filter = "CSV files (*.csv);;Text files (*.txt)" if extension == ".csv" else "Text files (*.txt);;CSV files (*.csv)"
+            target, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pair-subtracted I-q data", str(path.parent / default_name), file_filter)
+            if not target:
+                return
+            targets = [Path(target)]
+        else:
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export pair-subtracted I-q data to folder", str(path.parent))
+            if not folder:
+                return
+            targets = [Path(folder) / (_safe_filename(payload[0]) + extension) for payload in payloads]
+        try:
+            for payload, target in zip(payloads, targets, strict=True):
+                label, q, intensity, sigma, record, background_label, factor = payload
+                _write_curve_export(
+                    target,
+                    q,
+                    intensity,
+                    sigma,
+                    label=label,
+                    record=record,
+                    background_label=background_label,
+                    background_factor=factor,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not export pair outputs: {exc}")
+            return
+        self.status_label.setText(f"Exported {len(targets)} pair-subtracted output(s).")
+
     def _selected_curve_indices(self) -> list[int]:
         rows = sorted({index.row() for index in self.curve_list.selectedIndexes()})
         return [int(self.curve_list.item(row).data(QtCore.Qt.UserRole)) for row in rows]
+
+    def _append_pair_row(self, sample_index: int, background_index: int) -> None:
+        sample = self.curves[sample_index]
+        background = self.curves[background_index]
+        row = self.pair_table.rowCount()
+        self.pair_table.insertRow(row)
+        output_name = _default_pair_output_name(sample.label)
+        items = [
+            QtWidgets.QTableWidgetItem(output_name),
+            QtWidgets.QTableWidgetItem(_compact_curve_label(sample.label)),
+            QtWidgets.QTableWidgetItem(_compact_curve_label(background.label)),
+            QtWidgets.QTableWidgetItem("1.0"),
+        ]
+        items[1].setData(QtCore.Qt.UserRole, sample_index)
+        items[2].setData(QtCore.Qt.UserRole, background_index)
+        for column, item in enumerate(items):
+            if column in {1, 2}:
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+            self.pair_table.setItem(row, column, item)
+
+    def _pair_curve_payloads(
+        self,
+    ) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray | None, H5CurveRecord, str, float]]:
+        path = Path(self.path_edit.text().strip())
+        payloads: list[tuple[str, np.ndarray, np.ndarray, np.ndarray | None, H5CurveRecord, str, float]] = []
+        for row in range(self.pair_table.rowCount()):
+            output_item = self.pair_table.item(row, 0)
+            sample_item = self.pair_table.item(row, 1)
+            background_item = self.pair_table.item(row, 2)
+            factor_item = self.pair_table.item(row, 3)
+            if sample_item is None or background_item is None:
+                continue
+            sample_index = sample_item.data(QtCore.Qt.UserRole)
+            background_index = background_item.data(QtCore.Qt.UserRole)
+            if sample_index is None or background_index is None:
+                continue
+            factor = _float_table_value(factor_item, 1.0)
+            sample_record = self.curves[int(sample_index)]
+            background_record = self.curves[int(background_index)]
+            sample_h5 = Path(sample_record.h5_path) if sample_record.h5_path else path
+            background_h5 = Path(background_record.h5_path) if background_record.h5_path else path
+            q, intensity, sigma = _read_curve_from_h5_path(sample_h5, sample_record)
+            background_q, background_i, background_sigma = _read_curve_from_h5_path(background_h5, background_record)
+            q, intensity, sigma = _subtract_background_curve(q, intensity, sigma, background_q, background_i, background_sigma, factor)
+            output_name = output_item.text().strip() if output_item else ""
+            if not output_name:
+                output_name = _default_pair_output_name(sample_record.label)
+            label = f"{output_name}: {_compact_curve_label(sample_record.label)} - {factor:.5g} x {_compact_curve_label(background_record.label)}"
+            payloads.append((label, q, intensity, sigma, sample_record, background_record.label, factor))
+        return payloads
+
+    def _curve_index_for_key(self, key: tuple[str, str, int | None]) -> int | None:
+        for index, curve in enumerate(self.curves):
+            if _record_key(curve) == key:
+                return index
+        return None
 
     def _prepared_curve_data(
         self,
@@ -803,6 +1011,27 @@ def _nearest_plotted_point(
 def _safe_filename(label: str, max_length: int = 120) -> str:
     text = re.sub(r"[^\w.\-]+", "_", label.strip(), flags=re.ASCII).strip("._")
     return (text or "curve")[:max_length]
+
+
+def _compact_curve_label(label: str, max_length: int = 46) -> str:
+    text = str(label).strip()
+    if len(text) <= max_length:
+        return text
+    return "..." + text[-(max_length - 3) :]
+
+
+def _default_pair_output_name(sample_label: str) -> str:
+    text = _safe_filename(sample_label, max_length=40)
+    return text or "pair_output"
+
+
+def _float_table_value(item: QtWidgets.QTableWidgetItem | None, default: float) -> float:
+    if item is None:
+        return default
+    try:
+        return float(item.text().strip())
+    except ValueError:
+        return default
 
 
 def _write_curve_export(
