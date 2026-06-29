@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import os
 import re
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+from .xanos_export import write_xanos_curve_file, xanos_curve_header_info
 
 
 H5_FILTER = "HDF5 files (*.h5 *.hdf5);;All files (*)"
@@ -166,15 +167,11 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         plot_button = QtWidgets.QPushButton("Plot Selected")
         plot_button.setMinimumWidth(112)
         plot_button.clicked.connect(self.plot_selected)
-        self.export_format_combo = QtWidgets.QComboBox()
-        self.export_format_combo.addItems(["CSV", "TXT"])
-        export_button = QtWidgets.QPushButton("Export Selected")
-        export_button.setMinimumWidth(122)
+        export_button = QtWidgets.QPushButton("Export XAnoS .dat")
+        export_button.setMinimumWidth(142)
         export_button.clicked.connect(self.export_selected_curves)
         action_row.addWidget(plot_button)
         action_row.addStretch(1)
-        action_row.addWidget(QtWidgets.QLabel("Export"))
-        action_row.addWidget(self.export_format_combo)
         action_row.addWidget(export_button)
         left_layout.addLayout(action_row)
 
@@ -228,7 +225,7 @@ class H5IqViewerDialog(QtWidgets.QDialog):
 
         pair_row_1 = QtWidgets.QHBoxLayout()
         add_pair = QtWidgets.QPushButton("Add Pair")
-        add_pair.setToolTip("Select sample and background curves, then add them as one subtraction pair.")
+        add_pair.setToolTip("With a marked background, add every selected sample as a separate subtraction pair.")
         add_pair.clicked.connect(self.add_pair_from_selection)
         remove_pair = QtWidgets.QPushButton("Remove Pair")
         remove_pair.clicked.connect(self.remove_selected_pairs)
@@ -473,19 +470,19 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             self.status_label.setText("Select one or more curves to export.")
             return
         background = self._background_curve_data()
-        extension = ".csv" if self.export_format_combo.currentText().upper() == "CSV" else ".txt"
         if len(selected) == 1:
-            default_name = _safe_filename(self.curves[selected[0]].label) + extension
-            file_filter = "CSV files (*.csv);;Text files (*.txt)" if extension == ".csv" else "Text files (*.txt);;CSV files (*.csv)"
-            target, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export selected I-q data", str(path.parent / default_name), file_filter)
+            default_name = _safe_filename(self.curves[selected[0]].label) + ".dat"
+            target, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Export selected I-q data in XAnoS format", str(path.parent / default_name), "XAnoS data files (*.dat)"
+            )
             if not target:
                 return
-            targets = [Path(target)]
+            targets = [_xanos_dat_path(Path(target))]
         else:
-            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export selected I-q data to folder", str(path.parent))
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export selected XAnoS .dat files to folder", str(path.parent))
             if not folder:
                 return
-            targets = [Path(folder) / (_safe_filename(self.curves[index].label) + extension) for index in selected]
+            targets = [Path(folder) / (_safe_filename(self.curves[index].label) + ".dat") for index in selected]
         try:
             for record_index, target in zip(selected, targets, strict=True):
                 q, intensity, sigma, label, record = self._prepared_curve_data(record_index, path, background)
@@ -511,11 +508,24 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             if background_index is None:
                 self.status_label.setText("Marked background is not visible in the current list.")
                 return
-            sample_candidates = [index for index in selected if index != background_index]
+            sample_candidates = _fixed_background_sample_indices(selected, background_index)
             if not sample_candidates:
                 self.status_label.setText("Select at least one sample curve that is not the marked background.")
                 return
-            sample_index = sample_candidates[0]
+            added = 0
+            for sample_index in sample_candidates:
+                if self._pair_row_exists(sample_index, background_index):
+                    continue
+                self._append_pair_row(sample_index, background_index)
+                added += 1
+            skipped = len(sample_candidates) - added
+            if added and skipped:
+                self.status_label.setText(f"Added {added} sample-background pair(s); skipped {skipped} duplicate(s).")
+            elif added:
+                self.status_label.setText(f"Added {added} sample-background pair(s) using the marked background.")
+            else:
+                self.status_label.setText("All selected sample-background pairs are already in the table.")
+            return
         elif len(selected) >= 2:
             current_item = self.curve_list.currentItem()
             current_index = current_item.data(QtCore.Qt.UserRole) if current_item is not None else None
@@ -527,6 +537,9 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             return
         if sample_index == background_index:
             self.status_label.setText("Sample and background curve must be different.")
+            return
+        if self._pair_row_exists(sample_index, background_index):
+            self.status_label.setText("This sample-background pair is already in the table.")
             return
         self._append_pair_row(sample_index, background_index)
         self.status_label.setText("Added one sample-background pair.")
@@ -584,19 +597,19 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             self.status_label.setText("Add one or more sample-background pairs first.")
             return
         path = Path(self.path_edit.text().strip())
-        extension = ".csv" if self.export_format_combo.currentText().upper() == "CSV" else ".txt"
         if len(payloads) == 1:
-            default_name = _safe_filename(payloads[0][0]) + extension
-            file_filter = "CSV files (*.csv);;Text files (*.txt)" if extension == ".csv" else "Text files (*.txt);;CSV files (*.csv)"
-            target, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pair-subtracted I-q data", str(path.parent / default_name), file_filter)
+            default_name = _safe_filename(payloads[0][0]) + ".dat"
+            target, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Export pair-subtracted I-q data in XAnoS format", str(path.parent / default_name), "XAnoS data files (*.dat)"
+            )
             if not target:
                 return
-            targets = [Path(target)]
+            targets = [_xanos_dat_path(Path(target))]
         else:
-            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export pair-subtracted I-q data to folder", str(path.parent))
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export pair-subtracted XAnoS .dat files to folder", str(path.parent))
             if not folder:
                 return
-            targets = [Path(folder) / (_safe_filename(payload[0]) + extension) for payload in payloads]
+            targets = [Path(folder) / (_safe_filename(payload[0]) + ".dat") for payload in payloads]
         try:
             for payload, target in zip(payloads, targets, strict=True):
                 label, q, intensity, sigma, record, background_label, factor = payload
@@ -637,6 +650,16 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             if column in {1, 2}:
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
             self.pair_table.setItem(row, column, item)
+
+    def _pair_row_exists(self, sample_index: int, background_index: int) -> bool:
+        for row in range(self.pair_table.rowCount()):
+            sample_item = self.pair_table.item(row, 1)
+            background_item = self.pair_table.item(row, 2)
+            if sample_item is None or background_item is None:
+                continue
+            if sample_item.data(QtCore.Qt.UserRole) == sample_index and background_item.data(QtCore.Qt.UserRole) == background_index:
+                return True
+        return False
 
     def _pair_curve_payloads(
         self,
@@ -1025,6 +1048,10 @@ def _default_pair_output_name(sample_label: str) -> str:
     return text or "pair_output"
 
 
+def _fixed_background_sample_indices(selected: list[int], background_index: int) -> list[int]:
+    return list(dict.fromkeys(index for index in selected if index != background_index))
+
+
 def _float_table_value(item: QtWidgets.QTableWidgetItem | None, default: float) -> float:
     if item is None:
         return default
@@ -1045,30 +1072,43 @@ def _write_curve_export(
     background_label: str | None,
     background_factor: float | None,
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    delimiter = "," if path.suffix.lower() == ".csv" else "\t"
-    sigma_values = sigma if sigma is not None else np.full_like(q, np.nan, dtype=float)
-    n = min(q.size, intensity.size, sigma_values.size)
-    rows = zip(q[:n], intensity[:n], sigma_values[:n], strict=True)
-    header_lines = [
-        f"# label: {label}",
-        f"# group_path: {record.group_path}",
-        f"# q_path: {record.q_path}",
-        f"# i_path: {record.i_path}",
-    ]
+    source_h5 = Path(record.h5_path) if record.h5_path else Path("unknown_analysis.h5")
+    energy_kev = np.nan
+    header_info: dict[str, float | str | None] = {}
+    if record.h5_path and source_h5.exists():
+        with h5py.File(source_h5, "r") as handle:
+            group = handle.get(record.group_path)
+            if isinstance(group, h5py.Group):
+                energy_kev, header_info = xanos_curve_header_info(handle, group, record.row)
+    metadata_extra: dict[str, object] = {
+        "viewer_label": label,
+        "q_path": record.q_path,
+        "i_path": record.i_path,
+    }
     if record.sigma_path:
-        header_lines.append(f"# sigma_path: {record.sigma_path}")
-    if record.h5_path:
-        header_lines.append(f"# source_h5: {record.h5_path}")
+        metadata_extra["sigma_path"] = record.sigma_path
     if background_label is not None and background_factor is not None:
-        header_lines.append(f"# background: {background_factor:.8g} x {background_label}")
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        for line in header_lines:
-            handle.write(line + "\n")
-        writer = csv.writer(handle, delimiter=delimiter)
-        writer.writerow(["q", "I", "sigma_I"])
-        for row in rows:
-            writer.writerow([f"{float(row[0]):.10g}", f"{float(row[1]):.10g}", f"{float(row[2]):.10g}"])
+        metadata_extra["background_label"] = background_label
+        metadata_extra["background_factor"] = float(background_factor)
+    write_xanos_curve_file(
+        _xanos_dat_path(path),
+        q,
+        intensity,
+        sigma,
+        analysis_h5=source_h5,
+        h5_data_path=record.group_path,
+        output_name=label,
+        energy_index=(record.row or 0) + 1,
+        energy_kev=energy_kev,
+        cf=header_info.get("CF", 1.0),
+        thickness=header_info.get("Thickness", 1.0),
+        xrf_bkg=header_info.get("xrf_bkg", 0.0),
+        metadata_extra=metadata_extra,
+    )
+
+
+def _xanos_dat_path(path: Path) -> Path:
+    return path if path.suffix.lower() == ".dat" else path.with_suffix(".dat")
 
 
 def _subtract_background_curve(

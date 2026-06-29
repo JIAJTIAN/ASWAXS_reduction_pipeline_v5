@@ -143,30 +143,20 @@ def _write_xanos_payload(
         thickness = _header_float(header_info.get("Thickness"), 1.0)
         xrf_bkg = _header_float(header_info.get("xrf_bkg"), 0.0)
         out_path = output_dir / f"energy_{row:03d}_{output_name}_final.dat"
-        metadata = {
-            "analysis_h5": str(analysis_h5),
-            "h5_data_path": h5_data_path,
-            "output_name": output_name,
-            "energy_index": row,
-            "energy_kev": energy_value if np.isfinite(energy_value) else None,
-            "format": "XAnoS-compatible reduced I-q curve",
-            "CF": cf,
-            "Thickness": thickness,
-            "xrf_bkg": xrf_bkg,
-        }
-        header = "\n".join(
-            [
-                "Reduced per-energy I-q curve exported from analysis HDF5",
-                f"Energy={energy_value:.9f}" if np.isfinite(energy_value) else "Energy=nan",
-                f"CF={cf:.12g}",
-                f"Thickness={thickness:.12g}",
-                f"xrf_bkg={xrf_bkg:.12g}",
-                "metadata_json=" + json.dumps(metadata, sort_keys=True),
-                "col_names=['Q (inv Angs)','Int','Int_err']",
-                "columns=q I_final I_final_err",
-            ]
+        write_xanos_curve_file(
+            out_path,
+            q_row,
+            curve,
+            sigma_row,
+            analysis_h5=analysis_h5,
+            h5_data_path=h5_data_path,
+            output_name=output_name,
+            energy_index=row,
+            energy_kev=energy_value,
+            cf=cf,
+            thickness=thickness,
+            xrf_bkg=xrf_bkg,
         )
-        np.savetxt(out_path, np.column_stack([q_row, curve, sigma_row]), header=header, comments="#")
         written.append(out_path)
 
     list_path = output_dir / XANOS_FILE_LIST_NAME
@@ -175,6 +165,95 @@ def _write_xanos_payload(
             handle.write(str(out_path) + "\n")
     written.append(list_path)
     return written
+
+
+def write_xanos_curve_file(
+    path: str | Path,
+    q: np.ndarray,
+    intensity: np.ndarray,
+    sigma: np.ndarray | None,
+    *,
+    analysis_h5: str | Path,
+    h5_data_path: str,
+    output_name: str,
+    energy_index: int = 1,
+    energy_kev: float = np.nan,
+    cf: float = 1.0,
+    thickness: float = 1.0,
+    xrf_bkg: float = 0.0,
+    metadata_extra: dict[str, object] | None = None,
+) -> Path:
+    """Write one curve using the exact header and columns used by XAnoS export."""
+    destination = Path(path)
+    sigma_values = np.full_like(np.asarray(intensity, dtype=float), np.nan) if sigma is None else sigma
+    q_values, intensity_values, sigma_values = _finite_curve_rows(q, intensity, sigma_values)
+    if q_values.size == 0:
+        raise RuntimeError("Cannot export XAnoS .dat: the curve has no finite q and intensity values.")
+    if not np.any(np.isfinite(sigma_values)):
+        raise RuntimeError("Cannot export XAnoS .dat: sigma_I contains no finite error values.")
+
+    energy_value = _header_float(energy_kev, np.nan)
+    cf_value = _header_float(cf, 1.0)
+    thickness_value = _header_float(thickness, 1.0)
+    xrf_value = _header_float(xrf_bkg, 0.0)
+    metadata = {
+        "analysis_h5": str(analysis_h5),
+        "h5_data_path": h5_data_path,
+        "output_name": _safe_output_name(output_name),
+        "energy_index": int(energy_index),
+        "energy_kev": energy_value if np.isfinite(energy_value) else None,
+        "format": "XAnoS-compatible reduced I-q curve",
+        "CF": cf_value,
+        "Thickness": thickness_value,
+        "xrf_bkg": xrf_value,
+    }
+    if metadata_extra:
+        metadata.update(metadata_extra)
+    header = "\n".join(
+        [
+            "Reduced per-energy I-q curve exported from analysis HDF5",
+            f"Energy={energy_value:.9f}" if np.isfinite(energy_value) else "Energy=nan",
+            f"CF={cf_value:.12g}",
+            f"Thickness={thickness_value:.12g}",
+            f"xrf_bkg={xrf_value:.12g}",
+            "metadata_json=" + json.dumps(metadata, sort_keys=True),
+            "col_names=['Q (inv Angs)','Int','Int_err']",
+            "columns=q I_final I_final_err",
+        ]
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(
+        destination,
+        np.column_stack([q_values, intensity_values, sigma_values]),
+        header=header,
+        comments="#",
+    )
+    return destination
+
+
+def xanos_curve_header_info(
+    handle: h5py.File,
+    group: h5py.Group,
+    row: int | None,
+) -> tuple[float, dict[str, float | str | None]]:
+    """Return the energy and XAnoS header values for one HDF5 curve row."""
+    requested_row = max(0, int(row or 0))
+    rows = int(group["I"].shape[0]) if "I" in group and group["I"].ndim > 1 else requested_row + 1
+    row_index = min(requested_row, rows - 1)
+    header_info = _xanos_header_rows(handle, group, rows)[row_index]
+    energy = np.nan
+    energy_dataset = group.get("energy")
+    if isinstance(energy_dataset, h5py.Dataset):
+        values = np.asarray(energy_dataset[()], dtype=float).reshape(-1)
+        if row_index < values.size:
+            energy = float(values[row_index])
+    if not np.isfinite(energy):
+        energy = _curve_attr_float(group, "energy_kev", np.nan)
+    if not np.isfinite(energy):
+        fallback = _fallback_energy_values(handle, rows)
+        if row_index < fallback.size:
+            energy = float(fallback[row_index])
+    return energy, header_info
 
 
 def _sigma_failure_message(analysis_h5: Path) -> str:

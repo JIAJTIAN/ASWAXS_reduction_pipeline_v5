@@ -191,13 +191,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._build_actions()
         self._build_menus()
         self._build_queue_toolbar()
+        self._apply_professional_theme()
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(10, 10, 10, 8)
+        root.setSpacing(8)
 
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
         root.addWidget(self.tabs, 1)
 
         self._build_dashboard_tab()
@@ -209,6 +212,144 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.curve_refresh_timer.start()
 
         self.statusBar().showMessage("Ready")
+
+    def _apply_professional_theme(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow {
+                background: #f3f4f6;
+            }
+            QWidget {
+                color: #20242a;
+                font-size: 9pt;
+            }
+            QMenuBar {
+                background: #f3f4f6;
+                border-bottom: 1px solid #c8ccd2;
+            }
+            QMenuBar::item:selected, QMenu::item:selected {
+                background: #dce7f5;
+            }
+            QToolBar {
+                background: #eceff3;
+                border: 0;
+                border-bottom: 1px solid #c8ccd2;
+                spacing: 4px;
+                padding: 4px 6px;
+            }
+            QToolButton {
+                background: #ffffff;
+                border: 1px solid #b9c0ca;
+                border-radius: 3px;
+                color: #20242a;
+                padding: 4px 9px;
+                min-height: 20px;
+            }
+            QToolButton:hover {
+                background: #edf4fd;
+                border-color: #6f9ac8;
+            }
+            QToolButton:pressed {
+                background: #d9e8f7;
+            }
+            QToolButton:disabled {
+                background: #e5e7eb;
+                color: #8a9099;
+                border-color: #cdd2da;
+            }
+            QGroupBox {
+                background: #ffffff;
+                border: 1px solid #c8ccd2;
+                border-radius: 3px;
+                color: #28313f;
+                margin-top: 14px;
+                padding-top: 10px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: #28313f;
+            }
+            QTabWidget::pane {
+                border: 1px solid #c8ccd2;
+                background: #ffffff;
+            }
+            QTabBar::tab {
+                background: #e6e9ef;
+                border: 1px solid #c8ccd2;
+                border-bottom: 0;
+                color: #20242a;
+                padding: 5px 16px;
+                min-width: 92px;
+                margin-right: 1px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1f4f7f;
+                font-weight: 600;
+            }
+            QTableWidget, QTableView {
+                background: #ffffff;
+                alternate-background-color: #f7f9fb;
+                gridline-color: #d9dde3;
+                selection-background-color: #2f6fae;
+                selection-color: #ffffff;
+                border: 1px solid #c8ccd2;
+            }
+            QHeaderView::section {
+                background: #e6e9ef;
+                border: 0;
+                border-right: 1px solid #c8ccd2;
+                border-bottom: 1px solid #c8ccd2;
+                color: #20242a;
+                padding: 5px 6px;
+                font-weight: 600;
+            }
+            QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+                background: #ffffff;
+                border: 1px solid #b9c0ca;
+                border-radius: 2px;
+                padding: 3px 5px;
+            }
+            QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+                border-color: #2f6fae;
+            }
+            QPushButton {
+                background: #f8f9fb;
+                border: 1px solid #b9c0ca;
+                border-radius: 3px;
+                color: #20242a;
+                padding: 4px 10px;
+                min-height: 20px;
+            }
+            QLabel, QCheckBox, QRadioButton {
+                color: #20242a;
+            }
+            QPushButton:hover {
+                background: #edf4fd;
+                border-color: #6f9ac8;
+            }
+            QPushButton:pressed {
+                background: #d9e8f7;
+            }
+            QProgressBar {
+                background: #ffffff;
+                border: 1px solid #b9c0ca;
+                border-radius: 2px;
+                min-height: 18px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: #2f6fae;
+            }
+            QStatusBar {
+                background: #eceff3;
+                border-top: 1px solid #c8ccd2;
+            }
+            """
+        )
 
     def _build_actions(self) -> None:
         self.new_queue_action = QtWidgets.QAction("New Queue", self)
@@ -308,12 +449,33 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _build_queue_toolbar(self) -> None:
         toolbar = self.addToolBar("Queue")
         toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self._add_toolbar_label(toolbar, "Task")
+        toolbar.addAction(self.new_task_action)
+        toolbar.addAction(self.add_to_queue_action)
+        toolbar.addSeparator()
+        self._add_toolbar_label(toolbar, "Queue")
         toolbar.addAction(self.run_all_action)
         toolbar.addAction(self.stop_current_action)
+        toolbar.addAction(self.clear_queue_action)
+        toolbar.addSeparator()
+        self._add_toolbar_label(toolbar, "Output")
+        toolbar.addAction(self.open_output_action)
+        toolbar.addSeparator()
+        self._add_toolbar_label(toolbar, "Tools")
+        toolbar.addAction(self.h5_iq_viewer_action)
+
+    @staticmethod
+    def _add_toolbar_label(toolbar: QtWidgets.QToolBar, text: str) -> None:
+        label = QtWidgets.QLabel(text)
+        label.setStyleSheet("color: #53606f; font-weight: 600; padding: 0 5px 0 8px;")
+        toolbar.addWidget(label)
 
     def _build_dashboard_tab(self) -> None:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
 
         main_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         layout.addWidget(main_splitter, 1)
@@ -329,8 +491,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.queue_table.setColumnCount(7)
         self.queue_table.setHorizontalHeaderLabels(["Task", "Status", "Files", "Sequence", "Detectors", "ASAXS Pairs", "Output"])
         self.queue_table.setMinimumHeight(170)
+        self.queue_table.setAlternatingRowColors(True)
         self.queue_table.setWordWrap(False)
         self.queue_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.queue_table.verticalHeader().setVisible(False)
+        self.queue_table.verticalHeader().setDefaultSectionSize(26)
         header = self.queue_table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
@@ -349,25 +514,37 @@ class DashboardWindow(QtWidgets.QMainWindow):
         queue_layout.addWidget(self.queue_table)
         main_splitter.addWidget(queue_box)
 
-        main_splitter.addWidget(self._build_current_curves_panel())
+        self.lower_tabs = QtWidgets.QTabWidget()
+        self.lower_tabs.setDocumentMode(True)
+        self.lower_tabs.addTab(self._build_current_curves_panel(), "Final Curves")
+        self.lower_tabs.addTab(self._build_log_panel(), "Log")
+        self.lower_tabs.addTab(self._build_error_panel(), "Errors")
+        main_splitter.addWidget(self.lower_tabs)
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 4)
-        main_splitter.setSizes([190, 560])
+        main_splitter.setSizes([260, 540])
 
-        progress_box = QtWidgets.QGroupBox("Progress")
-        progress_layout = QtWidgets.QVBoxLayout(progress_box)
+        progress_box = QtWidgets.QGroupBox("Task Progress")
+        progress_layout = QtWidgets.QGridLayout(progress_box)
+        progress_layout.setContentsMargins(10, 14, 10, 8)
+        progress_layout.setHorizontalSpacing(12)
+        progress_layout.setVerticalSpacing(5)
         self.overall_progress = QtWidgets.QProgressBar()
         self.overall_progress.setRange(0, 100)
         self.current_stage_label = QtWidgets.QLabel("Idle")
+        self.current_stage_label.setObjectName("currentStageLabel")
+        self.current_stage_label.setStyleSheet("font-weight: 600; color: #28313f;")
         self.pil_detector_progress_label = QtWidgets.QLabel("Pil300K: idle")
         self.eig_detector_progress_label = QtWidgets.QLabel("Eig1M: idle")
-        detector_progress_row = QtWidgets.QHBoxLayout()
-        detector_progress_row.addWidget(self.pil_detector_progress_label)
-        detector_progress_row.addWidget(self.eig_detector_progress_label)
-        detector_progress_row.addStretch(1)
-        progress_layout.addWidget(self.overall_progress)
-        progress_layout.addWidget(self.current_stage_label)
-        progress_layout.addLayout(detector_progress_row)
+        self.pil_detector_progress_label.setStyleSheet("color: #425063;")
+        self.eig_detector_progress_label.setStyleSheet("color: #425063;")
+        progress_layout.addWidget(self.current_stage_label, 0, 0, 1, 1)
+        progress_layout.addWidget(self.overall_progress, 0, 1, 1, 2)
+        progress_layout.addWidget(self.pil_detector_progress_label, 1, 1)
+        progress_layout.addWidget(self.eig_detector_progress_label, 1, 2)
+        progress_layout.setColumnStretch(0, 1)
+        progress_layout.setColumnStretch(1, 2)
+        progress_layout.setColumnStretch(2, 2)
         layout.addWidget(progress_box)
 
         self.tabs.addTab(page, "Dashboard")
@@ -405,9 +582,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         controls.addStretch(1)
 
         self.current_curve_plot = pg.PlotWidget()
-        self.current_curve_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.current_curve_plot.setLabel("bottom", "q", units="A^-1")
-        self.current_curve_plot.setLabel("left", "I(q)", units="a.u.")
+        self._style_current_curve_plot()
         self.current_curve_legend = self.current_curve_plot.addLegend(offset=(8, 8))
         self.current_curve_plot.getPlotItem().setDownsampling(auto=True, mode="peak")
         self.current_curve_plot.getPlotItem().setClipToView(True)
@@ -416,6 +591,39 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.current_curve_status = QtWidgets.QLabel("Select a task to show final reduced curves.")
         layout.addWidget(self.current_curve_status)
         return curve_box
+
+    def _style_current_curve_plot(self) -> None:
+        self.current_curve_plot.setBackground("w")
+        plot_item = self.current_curve_plot.getPlotItem()
+        plot_item.showGrid(x=True, y=True, alpha=0.22)
+        plot_item.setLabel("bottom", "q", units="A^-1", color="#20242a")
+        plot_item.setLabel("left", "I(q)", units="a.u.", color="#20242a")
+        plot_item.getAxis("bottom").setPen(pg.mkPen("#4b5563"))
+        plot_item.getAxis("left").setPen(pg.mkPen("#4b5563"))
+        plot_item.getAxis("bottom").setTextPen(pg.mkPen("#20242a"))
+        plot_item.getAxis("left").setTextPen(pg.mkPen("#20242a"))
+
+    def _build_log_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setPlaceholderText("Queue and reducer messages will appear here.")
+        self.log_view.setMaximumBlockCount(1200)
+        layout.addWidget(self.log_view, 1)
+        return panel
+
+    def _build_error_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.error_view = QtWidgets.QPlainTextEdit()
+        self.error_view.setReadOnly(True)
+        self.error_view.setPlaceholderText("Task failure details will appear here.")
+        self.error_view.setMaximumBlockCount(400)
+        layout.addWidget(self.error_view, 1)
+        return panel
 
     def _build_task_builder_tab(self) -> None:
         page = QtWidgets.QWidget()
@@ -567,6 +775,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         spin = QtWidgets.QSpinBox()
         spin.setRange(low, high)
         spin.setValue(value)
+        spin.setFixedWidth(88)
         return spin
 
     @staticmethod
@@ -575,6 +784,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         spin.setRange(low, high)
         spin.setDecimals(5)
         spin.setValue(value)
+        spin.setFixedWidth(118)
         return spin
 
     def _file_browse_row(self, edit: QtWidgets.QLineEdit, title: str, file_filter: str) -> QtWidgets.QWidget:
@@ -1134,17 +1344,19 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.queue_table.setStyleSheet(
             """
             QTableWidget {
-                background: #eeeeee;
-                color: #777777;
-                gridline-color: #d0d0d0;
+                background: #eef0f3;
+                color: #707986;
+                gridline-color: #d3d8df;
+                selection-background-color: #b9c7d8;
+                selection-color: #28313f;
             }
             QTableWidget::item {
-                background: #eeeeee;
-                color: #777777;
+                background: #eef0f3;
+                color: #707986;
             }
             QHeaderView::section {
-                background: #e0e0e0;
-                color: #777777;
+                background: #dfe4eb;
+                color: #66707f;
             }
             """
             if locked
@@ -1202,14 +1414,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
     def _style_queue_item(self, item: QtWidgets.QTableWidgetItem, status: str) -> None:
         palette = {
-            "Ready": (QtGui.QColor("#f7f7f7"), QtGui.QColor("#111111")),
-            "Queued": (QtGui.QColor("#fff4cc"), QtGui.QColor("#111111")),
-            "Running": (QtGui.QColor("#cfe8ff"), QtGui.QColor("#000000")),
-            "Done": (QtGui.QColor("#dff3df"), QtGui.QColor("#0b3d0b")),
-            "Failed": (QtGui.QColor("#ffd9d9"), QtGui.QColor("#6b0000")),
-            "Stopped": (QtGui.QColor("#eadfff"), QtGui.QColor("#2b145f")),
-            "Skipped": (QtGui.QColor("#e6e6e6"), QtGui.QColor("#333333")),
-            "Needs Attention": (QtGui.QColor("#ffe1b8"), QtGui.QColor("#5a2b00")),
+            "Ready": (QtGui.QColor("#ffffff"), QtGui.QColor("#20242a")),
+            "Queued": (QtGui.QColor("#fff4cc"), QtGui.QColor("#4b3a00")),
+            "Running": (QtGui.QColor("#dceaf8"), QtGui.QColor("#173c63")),
+            "Done": (QtGui.QColor("#e2f0e2"), QtGui.QColor("#1f5a24")),
+            "Failed": (QtGui.QColor("#f8dada"), QtGui.QColor("#8a1f17")),
+            "Stopped": (QtGui.QColor("#ebe5f8"), QtGui.QColor("#493174")),
+            "Skipped": (QtGui.QColor("#edf0f4"), QtGui.QColor("#58616d")),
+            "Needs Attention": (QtGui.QColor("#fde6c8"), QtGui.QColor("#795000")),
         }
         background, foreground = palette.get(status, (QtGui.QColor("#ffffff"), QtGui.QColor("#111111")))
         item.setBackground(background)
@@ -1780,6 +1992,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         if len(details) > 6000:
             details = details[-6000:]
             details = "... earlier traceback omitted ...\n" + details
+        if hasattr(self, "error_view"):
+            self.error_view.setPlainText(f"{task_name}\n\n{details}")
+            if hasattr(self, "lower_tabs"):
+                self.lower_tabs.setCurrentWidget(self.error_view.parentWidget())
         QtWidgets.QMessageBox.critical(self, "Task failed", f"{task_name}\n\n{details}")
 
     def _task_skipped(self, index: int, message: str) -> None:
@@ -1807,7 +2023,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.set_queue_locked(False)
         self.overall_progress.setRange(0, 100)
         if any(0 <= index < len(self.tasks) and self.tasks[index].status == "Done" for index in self.active_run_indices):
-            self._set_task_progress_value(1.0, "Queue complete")
+            self._set_task_progress_value(1.0, "Last task complete")
         else:
             self._reset_task_progress()
         self.current_stage_label.setText("Idle")
@@ -1893,6 +2109,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def log(self, message: str) -> None:
         self.log_messages.append(message)
         self.log_messages = self.log_messages[-1000:]
+        if hasattr(self, "log_view"):
+            self.log_view.appendPlainText(message)
+            self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
         self.statusBar().showMessage(message[:180])
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802 - Qt override name.

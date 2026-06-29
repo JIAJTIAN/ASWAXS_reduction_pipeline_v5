@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from aswaxs_live.h5_tools import H5CurveRecord, _curve_matches_source, _safe_filename, _subtract_background_curve, _write_curve_export, discover_iq_curves
+from aswaxs_live.h5_tools import H5CurveRecord, _curve_matches_source, _fixed_background_sample_indices, _safe_filename, _subtract_background_curve, _write_curve_export, _xanos_dat_path, discover_iq_curves
 
 
 def _record(label: str, group_path: str, h5_path: str = "") -> H5CurveRecord:
@@ -34,8 +34,13 @@ def test_curve_source_filter_splits_detector_and_combined_curves() -> None:
 
 
 def test_write_curve_export_carries_header_and_sigma(tmp_path: Path) -> None:
-    record = _record("Stitched / sample | I", "/entry/stitched_averages/curves/sample")
-    target = tmp_path / (_safe_filename(record.label) + ".csv")
+    h5_path = tmp_path / "sample_analysis.h5"
+    with h5py.File(h5_path, "w") as handle:
+        group = handle.create_group("/entry/stitched_averages/curves/sample")
+        group.create_dataset("I", data=np.array([10.0, 9.0]))
+        group.attrs["energy_kev"] = 9.3
+    record = _record("Stitched / sample | I", "/entry/stitched_averages/curves/sample", str(h5_path))
+    target = tmp_path / (_safe_filename(record.label) + ".dat")
 
     _write_curve_export(
         target,
@@ -49,10 +54,19 @@ def test_write_curve_export_carries_header_and_sigma(tmp_path: Path) -> None:
     )
 
     text = target.read_text(encoding="utf-8")
-    assert "# label: Stitched / sample | I" in text
-    assert "# background: 0.98 x solvent" in text
-    assert "q,I,sigma_I" in text
-    assert "0.1,10,0.5" in text
+    assert "#Reduced per-energy I-q curve exported from analysis HDF5" in text
+    assert "#Energy=9.300000000" in text
+    assert "#CF=1" in text
+    assert '"background_factor": 0.98' in text
+    assert '"background_label": "solvent"' in text
+    assert "#col_names=['Q (inv Angs)','Int','Int_err']" in text
+    assert "#columns=q I_final I_final_err" in text
+    np.testing.assert_allclose(np.loadtxt(target), [[0.1, 10.0, 0.5], [0.2, 9.0, 0.4]])
+
+
+def test_xanos_dat_path_replaces_non_dat_suffix() -> None:
+    assert _xanos_dat_path(Path("curve.csv")) == Path("curve.dat")
+    assert _xanos_dat_path(Path("curve")) == Path("curve.dat")
 
 
 def test_discover_iq_curves_uses_sigma_as_error_not_curve(tmp_path: Path) -> None:
@@ -93,3 +107,7 @@ def test_pair_subtraction_interpolates_background_and_propagates_error() -> None
     np.testing.assert_allclose(corrected_q, q)
     np.testing.assert_allclose(corrected_i, [9.0, 18.0, 27.0])
     np.testing.assert_allclose(corrected_sigma, np.sqrt([1.0**2 + 0.25**2, 1.0**2 + 0.5**2, 1.0**2 + 0.75**2]))
+
+
+def test_fixed_background_builds_multiple_unique_sample_pairs() -> None:
+    assert _fixed_background_sample_indices([1, 2, 4, 2, 7], background_index=4) == [1, 2, 7]
