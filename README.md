@@ -1,5 +1,7 @@
 ﻿# FrameByFrame-ASWAXS
 
+> in your own analysis
+
 FrameByFrame-ASWAXS is a GUI-first post-processing platform for turning raw
 SAXS/WAXS/ASAXS HDF5 detector frames into analysis-ready I(q) curves,
 provenance-rich analysis HDF5 files, XAnoS-compatible text exports, and
