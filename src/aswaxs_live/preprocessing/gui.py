@@ -46,7 +46,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
     """Interactive pyFAI setup window; scientific reduction happens elsewhere."""
     def __init__(self, initial_path: str | None = None):
         super().__init__()
-        self.setWindowTitle("ASWAXS pyFAI Setup")
+        self.setWindowTitle("FrameByFrame-ASWAXS pyFAI Setup")
 
         self.current_file: Path | None = None
         self.current_image: np.ndarray | None = None
@@ -567,7 +567,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         output.parent.mkdir(parents=True, exist_ok=True)
         header = "\n".join(
             [
-                "ASWAXS pyFAI radial integration preview",
+                "FrameByFrame-ASWAXS pyFAI radial integration preview",
                 f"source_h5={self.current_file}",
                 f"poni={self.current_poni_path}",
                 f"unit={self.integrate_unit_edit.text().strip() or 'q_A^-1'}",

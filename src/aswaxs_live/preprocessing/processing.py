@@ -99,7 +99,7 @@ def write_pyfai_integrate_config(
         "correct_solid_angle": True,
         "error_model": "poisson",
         "extra_options": {
-            "source": "ASWAXS v5 run_pyfai_gui",
+            "source": "FrameByFrame-ASWAXS pyFAI GUI",
             "h5_metadata": _json_safe_metadata(h5_metadata or {}),
         },
     }

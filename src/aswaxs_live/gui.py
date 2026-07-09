@@ -1,4 +1,4 @@
-﻿"""GUI launcher for the ASWAXS v5 live pipeline.
+﻿"""Legacy GUI launcher for FrameByFrame-ASWAXS live reduction.
 
 Window 0 is the setup/control window. It builds the command for the live reducer
 launcher and can launch/stop the reducer.
@@ -446,11 +446,11 @@ class TabbedToolWindow(QtWidgets.QMainWindow):
 
 
 class SetupWindow(QtWidgets.QMainWindow):
-    """Parameter window for launching and monitoring the V5 live reducer."""
+    """Parameter window for launching and monitoring live reduction."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ASWAXS v5 Live Pipeline Setup")
+        self.setWindowTitle("FrameByFrame-ASWAXS Live Pipeline Setup")
         self.resize(1180, 860)
         self.process: QtCore.QProcess | None = None
         self.bridge_process: QtCore.QProcess | None = None

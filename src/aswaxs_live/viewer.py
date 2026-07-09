@@ -101,7 +101,7 @@ class H5FrameTable:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Show live 1D curves written by the ASWAXS v5 reducer.")
+    parser = argparse.ArgumentParser(description="Show live 1D curves written by FrameByFrame-ASWAXS.")
     parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT_DIR),

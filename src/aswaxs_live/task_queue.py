@@ -1,4 +1,4 @@
-"""Task queue model for ASWAXS v5 GUI runs."""
+"""Task queue model for FrameByFrame-ASWAXS GUI runs."""
 
 from __future__ import annotations
 

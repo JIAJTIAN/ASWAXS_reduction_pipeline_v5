@@ -1,8 +1,8 @@
-﻿# ASWAXS Reduction Pipeline V5
+﻿# FrameByFrame-ASWAXS
 
-ASWAXS Reduction Pipeline V5 is a GUI-first post-processing platform for
-turning raw SAXS/WAXS/ASAXS HDF5 detector frames into analysis-ready I(q)
-curves, provenance-rich analysis HDF5 files, XAnoS-compatible text exports, and
+FrameByFrame-ASWAXS is a GUI-first post-processing platform for turning raw
+SAXS/WAXS/ASAXS HDF5 detector frames into analysis-ready I(q) curves,
+provenance-rich analysis HDF5 files, XAnoS-compatible text exports, and
 quality-control plots.
 
 The goal is to make beamline reduction feel like guided scientific software,
@@ -24,8 +24,8 @@ The platform is designed around the full post-acquisition workflow:
 7. Review final curves and quality-control diagnostics in the GUI.
 8. Export XAnoS-compatible `.dat` files or open downstream XAnoS tools.
 
-This makes V5 useful both for beamtime batch reduction and for post-processing
-already-collected datasets.
+This makes FrameByFrame-ASWAXS useful both for beamtime batch reduction and for
+post-processing already-collected datasets.
 
 ## Design Principles
 
@@ -45,7 +45,7 @@ already-collected datasets.
   and SAXS-only reductions. ASAXS keeps energy-indexed filenames; SAXS-only uses
   clean sample/output names.
 
-## What V5 Provides
+## What FrameByFrame-ASWAXS Provides
 
 - Guided task builder with clickable steps.
 - Queue table for adding, editing, deleting, reordering, and running tasks.
@@ -90,6 +90,18 @@ python -m pip install -e .
 ```
 
 After that, start the GUI from any directory with:
+
+```text
+framebyframe-aswaxs
+```
+
+Shorter compatibility aliases are also available:
+
+```text
+framebyframe
+```
+
+The older ASWAXS command remains available too:
 
 ```text
 aswaxs
@@ -404,12 +416,12 @@ remaining-time estimate will reflect the requested count.
 
 ## Main Task Queue GUI
 
-The v5 application combines task creation, queue control, task progress, final
+FrameByFrame-ASWAXS combines task creation, queue control, task progress, final
 curve preview, and HDF5 tools in one dashboard. After installation, start it
 from any directory with:
 
 ```text
-aswaxs
+framebyframe-aswaxs
 ```
 
 For an uninstalled copied checkout, run this from the project root:

@@ -1,4 +1,4 @@
-"""Visual capillary rack helper for ASWAXS task setup.
+"""Visual capillary rack helper for FrameByFrame-ASWAXS task setup.
 
 This dialog is intentionally isolated from the reducer and queue code.  It only
 returns GUI form values: background groups and ASAXS sample/solvent pairs.
@@ -126,7 +126,7 @@ class RackBuilderDialog(QtWidgets.QDialog):
         pairs: list[tuple[str, int, int]] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("ASWAXS Rack Builder")
+        self.setWindowTitle("FrameByFrame-ASWAXS Rack Builder")
         self.positions: list[dict[str, object]] = []
         self._updating = False
         self._build_ui()

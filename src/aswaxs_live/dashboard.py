@@ -1,4 +1,4 @@
-"""ASWAXS v5 dashboard GUI."""
+"""FrameByFrame-ASWAXS dashboard GUI."""
 
 from __future__ import annotations
 
@@ -238,7 +238,7 @@ class HelpDocumentDialog(QtWidgets.QDialog):
 class DashboardWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ASWAXS v5")
+        self.setWindowTitle("FrameByFrame-ASWAXS")
         self.tasks: list[TaskSpec] = []
         self.log_messages: list[str] = []
         self.queue_path = DEFAULT_QUEUE_PATH
@@ -602,7 +602,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         help_menu = menu.addMenu("Help")
         help_menu.addAction(self.frame_stability_help_action)
         help_menu.addSeparator()
-        help_menu.addAction("About ASWAXS v5", self.about)
+        help_menu.addAction("About FrameByFrame-ASWAXS", self.about)
 
     def _build_queue_toolbar(self) -> None:
         toolbar = self.addToolBar("Queue")
@@ -2187,7 +2187,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self._queue_command_notice("No queue task is selected.")
             return
         payload = {
-            "format": "ASWAXS v5 queue tasks",
+            "format": "FrameByFrame-ASWAXS queue tasks",
             "version": 1,
             "tasks": [task_to_json(self.tasks[index]) for index in rows],
         }
@@ -2208,13 +2208,13 @@ class DashboardWindow(QtWidgets.QMainWindow):
             payload = json.loads(text)
             raw_tasks = payload.get("tasks") if isinstance(payload, dict) else payload
             if not isinstance(raw_tasks, list):
-                raise ValueError("clipboard does not contain ASWAXS task JSON")
+                raise ValueError("clipboard does not contain FrameByFrame-ASWAXS task JSON")
             tasks = [task_from_json(item) for item in raw_tasks if isinstance(item, dict)]
         except Exception as exc:  # noqa: BLE001 - show GUI-friendly status.
-            self._queue_command_notice(f"Clipboard does not contain valid ASWAXS queue task data: {exc}")
+            self._queue_command_notice(f"Clipboard does not contain valid FrameByFrame-ASWAXS queue task data: {exc}")
             return
         if not tasks:
-            self._queue_command_notice("Clipboard has no ASWAXS tasks to paste.")
+            self._queue_command_notice("Clipboard has no FrameByFrame-ASWAXS tasks to paste.")
             return
         selected = self.selected_indices()
         insert_at = (selected[-1] + 1) if selected else len(self.tasks)
@@ -2710,7 +2710,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.frame_stability_help_dialog.activateWindow()
 
     def about(self) -> None:
-        QtWidgets.QMessageBox.information(self, "About ASWAXS v5", "ASWAXS v5 task-queue dashboard.")
+        QtWidgets.QMessageBox.information(
+            self,
+            "About FrameByFrame-ASWAXS",
+            "FrameByFrame-ASWAXS is a GUI-first SAXS/WAXS/ASAXS reduction, QC, and post-processing platform.",
+        )
 
     def log(self, message: str) -> None:
         self.log_messages.append(message)

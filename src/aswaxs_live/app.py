@@ -13,7 +13,7 @@ def _quiet_server_glx_warning() -> None:
 
 
 def main() -> int:
-    """Start the ASWAXS dashboard."""
+    """Start the FrameByFrame-ASWAXS dashboard."""
     _quiet_server_glx_warning()
 
     from PyQt5 import QtWidgets
@@ -21,8 +21,8 @@ def main() -> int:
     from aswaxs_live.dashboard import DashboardWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("ASWAXS v5")
-    app.setOrganizationName("ASWAXS")
+    app.setApplicationName("FrameByFrame-ASWAXS")
+    app.setOrganizationName("ChemMatCARS")
     window = DashboardWindow()
     window.show()
     return app.exec_()

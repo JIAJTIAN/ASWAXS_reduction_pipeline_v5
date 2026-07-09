@@ -271,7 +271,7 @@ class SequenceAssigner:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run ASWAXS v5 live orchestration from replay, folder watch, or Bluesky-assisted queue.",
+        description="Run FrameByFrame-ASWAXS live orchestration from replay, folder watch, or Bluesky-assisted queue.",
     )
     parser.add_argument("--manifest", help="Existing sequence_manifest.csv to replay.")
     parser.add_argument("--watch-dir", help="Directory receiving live HDF5 files from acquisition.")

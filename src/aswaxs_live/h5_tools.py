@@ -114,7 +114,7 @@ class H5IqViewerDialog(QtWidgets.QDialog):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("HDF5 I-q Plot Viewer")
+        self.setWindowTitle("FrameByFrame-ASWAXS HDF5 I-q Plot Viewer")
         self.curves: list[H5CurveRecord] = []
         self.background_curve: BackgroundCurve | None = None
         self.background_record_key: tuple[str, str, int | None] | None = None
@@ -820,7 +820,7 @@ class H5StructureViewerDialog(QtWidgets.QDialog):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("HDF5 Structure / Metadata Viewer")
+        self.setWindowTitle("FrameByFrame-ASWAXS HDF5 Structure / Metadata Viewer")
         self._build_ui()
         apply_tool_theme(self)
         fit_window_to_available_screen(self, (1180, 760), minimum=(760, 520))
