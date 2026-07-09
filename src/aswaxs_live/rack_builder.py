@@ -9,7 +9,13 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
+from aswaxs_live.qt_runtime import suppress_glx_warning
+
+suppress_glx_warning()
+
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+from aswaxs_live.ui_theme import apply_tool_theme, fit_window_to_available_screen
 
 
 ROLE_SAMPLE = "Sample"
@@ -121,10 +127,11 @@ class RackBuilderDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("ASWAXS Rack Builder")
-        self.resize(1120, 720)
         self.positions: list[dict[str, object]] = []
         self._updating = False
         self._build_ui()
+        apply_tool_theme(self)
+        fit_window_to_available_screen(self, (1120, 720), minimum=(820, 560))
         self.set_group_count(group_count)
         self._seed_from_existing(gc_group, air_group, empty_group, pairs or [])
         self._select_row(0)
@@ -148,12 +155,15 @@ class RackBuilderDialog(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
         root.addLayout(controls)
         self.group_count_spin = QtWidgets.QSpinBox()
         self.group_count_spin.setRange(1, 96)
         self.group_count_spin.setValue(13)
+        self.group_count_spin.setFixedWidth(88)
         self.group_count_spin.valueChanged.connect(self.set_group_count)
         controls.addWidget(QtWidgets.QLabel("Rack positions / group count"))
         controls.addWidget(self.group_count_spin)
@@ -198,6 +208,7 @@ class RackBuilderDialog(QtWidgets.QDialog):
         self.name_edit.textChanged.connect(self._apply_editor)
         self.solvent_group_spin = QtWidgets.QSpinBox()
         self.solvent_group_spin.setRange(0, 999)
+        self.solvent_group_spin.setFixedWidth(138)
         self.solvent_group_spin.setSpecialValueText("nearest solvent")
         self.solvent_group_spin.valueChanged.connect(self._apply_editor)
         editor_layout.addRow("Group", self.selected_label)

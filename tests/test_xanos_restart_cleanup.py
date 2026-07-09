@@ -2,12 +2,19 @@ from pathlib import Path
 
 import pytest
 
-from aswaxs_live.task_queue import AsaxsPair, TaskSpec, _check_dat_files_writable, _clear_detector_output_records, _ensure_current_pair_xanos_outputs_writable
+from aswaxs_live.task_queue import (
+    AsaxsPair,
+    TaskSpec,
+    _check_dat_files_writable,
+    _clear_detector_output_records,
+    _clear_task_output_records,
+    _ensure_current_pair_xanos_outputs_writable,
+)
 
 
-def _task(output_dir: Path) -> TaskSpec:
+def _task(output_dir: Path, task_name: str = "demo_task") -> TaskSpec:
     return TaskSpec(
-        task_name="demo_task",
+        task_name=task_name,
         raw_folder=str(output_dir / "raw"),
         output_dir=str(output_dir),
         num_energies=1,
@@ -46,7 +53,8 @@ def test_restart_cleanup_keeps_dat_files_and_analysis_results(tmp_path: Path):
 
 
 def test_detector_restart_cleanup_keeps_xanos_dat_files(tmp_path: Path):
-    detector_dir = tmp_path / "Pil300K"
+    task = _task(tmp_path)
+    detector_dir = task.detector_output_dir("Pil300K")
     xanos_dir = detector_dir / "XAnos format" / "detector_output"
     xanos_dir.mkdir(parents=True)
     dat_file = xanos_dir / "old_curve.dat"
@@ -54,7 +62,7 @@ def test_detector_restart_cleanup_keeps_xanos_dat_files(tmp_path: Path):
     dat_file.write_text("old generated dat", encoding="utf-8")
     keep_file.write_text("important analysis", encoding="utf-8")
 
-    removed = _clear_detector_output_records(detector_dir)
+    removed = _clear_detector_output_records(task, "Pil300K")
 
     assert removed == 0
     assert xanos_dir.exists()
@@ -71,3 +79,33 @@ def test_xanos_permission_check_reports_non_writable_dat(tmp_path: Path, monkeyp
 
     with pytest.raises(PermissionError, match="Cannot overwrite existing XAnos .dat"):
         _check_dat_files_writable(folder)
+
+
+def test_restart_cleanup_only_removes_current_task_analysis_files(tmp_path: Path):
+    shared_output = tmp_path / "Extracted" / "BCP1"
+    current = _task(shared_output, task_name="BCP1_0.2x0.2")
+    sibling = _task(shared_output, task_name="BCP1_0.1x0.1")
+    shared_output.mkdir(parents=True)
+    for detector in ("Pil300K", "Eig1M"):
+        current.detector_output_dir(detector).mkdir(parents=True)
+
+    current.combined_h5_path().write_text("current combined", encoding="utf-8")
+    sibling.combined_h5_path().write_text("sibling combined", encoding="utf-8")
+    current.detector_analysis_h5_path("Pil300K").write_text("current pil", encoding="utf-8")
+    sibling.detector_analysis_h5_path("Pil300K").write_text("sibling pil", encoding="utf-8")
+    current.detector_analysis_h5_path("Eig1M").write_text("current eig", encoding="utf-8")
+    sibling.detector_analysis_h5_path("Eig1M").write_text("sibling eig", encoding="utf-8")
+
+    removed_root = _clear_task_output_records(current)
+    removed_pil = _clear_detector_output_records(current, "Pil300K")
+    removed_eig = _clear_detector_output_records(current, "Eig1M")
+
+    assert removed_root == 1
+    assert removed_pil == 1
+    assert removed_eig == 1
+    assert not current.combined_h5_path().exists()
+    assert not current.detector_analysis_h5_path("Pil300K").exists()
+    assert not current.detector_analysis_h5_path("Eig1M").exists()
+    assert sibling.combined_h5_path().read_text(encoding="utf-8") == "sibling combined"
+    assert sibling.detector_analysis_h5_path("Pil300K").read_text(encoding="utf-8") == "sibling pil"
+    assert sibling.detector_analysis_h5_path("Eig1M").read_text(encoding="utf-8") == "sibling eig"

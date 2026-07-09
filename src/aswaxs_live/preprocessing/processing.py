@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import fabio
 import numpy as np
 from pyFAI import load as load_poni
+
+from aswaxs_live.qt_runtime import suppress_glx_warning
 
 
 def export_image_as_edf(path: str | Path, image: np.ndarray, metadata: dict[str, Any] | None = None) -> Path:
@@ -55,7 +58,7 @@ def launch_pyfai_calib2(
 ) -> subprocess.Popen:
     """Launch pyFAI-calib2 with the optional detector geometry hints."""
     edf = Path(edf_path).expanduser().resolve()
-    command = ["python", "-m", "pyFAI.app.calib2", str(edf), "--calibrant", calibrant]
+    command = [sys.executable, "-m", "pyFAI.app.calib2", str(edf), "--calibrant", calibrant]
     if detector_name:
         command.extend(["--detector", str(detector_name)])
     if energy_kev is not None:
@@ -69,7 +72,7 @@ def launch_pyfai_calib2(
 
 def launch_pyfai_drawmask(edf_path: str | Path) -> subprocess.Popen:
     edf = Path(edf_path).expanduser().resolve()
-    command = ["python", "-m", "pyFAI.app.drawmask", str(edf)]
+    command = [sys.executable, "-m", "pyFAI.app.drawmask", str(edf)]
     return subprocess.Popen(command, cwd=edf.parent, env=_pyfai_qt_env())
 
 
@@ -124,7 +127,7 @@ def launch_pyfai_integrate(
     """Launch pyFAI-integrate on the exported EDF bridge with a JSON config."""
     edf = Path(edf_path).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
-    command = ["python", "-m", "pyFAI.app.integrate", "-j", str(config), "--delete"]
+    command = [sys.executable, "-m", "pyFAI.app.integrate", "-j", str(config), "--delete"]
     if output_dir is not None:
         command.extend(["--output", str(Path(output_dir).expanduser().resolve())])
     command.append(str(edf))
@@ -135,6 +138,7 @@ def _pyfai_qt_env(force_software_gl: bool = False) -> dict[str, str]:
     """Return a Qt environment suitable for pyFAI tools on remote displays."""
     env = os.environ.copy()
     env.setdefault("QT_API", "pyqt5")
+    suppress_glx_warning(env)
     if force_software_gl:
         env["QT_OPENGL"] = "software"
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"

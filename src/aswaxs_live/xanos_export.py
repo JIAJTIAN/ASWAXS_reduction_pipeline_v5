@@ -38,7 +38,9 @@ def export_analysis_h5_to_xanos_format(
             if fallback is None:
                 return []
             output_name, q, intensity, sigma, energy, h5_data_path, header_rows = fallback
+            use_energy_prefix = False
         else:
+            use_energy_prefix = True
             named_root = handle.get("/entry/asaxs_outputs")
             if named_root is not None:
                 named_payloads = []
@@ -70,6 +72,7 @@ def export_analysis_h5_to_xanos_format(
                                 energy,
                                 f"/entry/asaxs_outputs/{output_name}/corrected_I_q_E",
                                 header_rows,
+                                use_energy_prefix=True,
                             )
                         )
                     return written
@@ -91,6 +94,7 @@ def export_analysis_h5_to_xanos_format(
                 if fallback is None:
                     return []
                 output_name, q, intensity, sigma, energy, h5_data_path, header_rows = fallback
+                use_energy_prefix = False
 
     if intensity.ndim == 1:
         intensity = intensity.reshape(1, -1)
@@ -99,7 +103,17 @@ def export_analysis_h5_to_xanos_format(
     if energy.ndim == 0:
         energy = energy.reshape(1)
 
-    return _write_xanos_payload(path, output_name, q, intensity, sigma, energy, h5_data_path, header_rows)
+    return _write_xanos_payload(
+        path,
+        output_name,
+        q,
+        intensity,
+        sigma,
+        energy,
+        h5_data_path,
+        header_rows,
+        use_energy_prefix=use_energy_prefix,
+    )
 
 
 def _write_xanos_payload(
@@ -111,6 +125,7 @@ def _write_xanos_payload(
     energy: np.ndarray | None,
     h5_data_path: str,
     header_rows: list[dict[str, float | str | None]] | None = None,
+    use_energy_prefix: bool = True,
 ) -> list[Path]:
     output_name = _safe_output_name(output_name)
     if sigma is None:
@@ -142,7 +157,7 @@ def _write_xanos_payload(
         cf = _header_float(header_info.get("CF"), 1.0)
         thickness = _header_float(header_info.get("Thickness"), 1.0)
         xrf_bkg = _header_float(header_info.get("xrf_bkg"), 0.0)
-        out_path = output_dir / f"energy_{row:03d}_{output_name}_final.dat"
+        out_path = output_dir / _xanos_curve_filename(output_name, row, intensity.shape[0], use_energy_prefix)
         write_xanos_curve_file(
             out_path,
             q_row,
@@ -165,6 +180,14 @@ def _write_xanos_payload(
             handle.write(str(out_path) + "\n")
     written.append(list_path)
     return written
+
+
+def _xanos_curve_filename(output_name: str, row: int, total_rows: int, use_energy_prefix: bool) -> str:
+    if use_energy_prefix:
+        return f"energy_{row:03d}_{output_name}_final.dat"
+    if total_rows <= 1:
+        return f"{output_name}_final.dat"
+    return f"{output_name}_{row:03d}_final.dat"
 
 
 def write_xanos_curve_file(

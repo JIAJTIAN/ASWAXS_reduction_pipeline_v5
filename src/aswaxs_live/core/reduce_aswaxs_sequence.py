@@ -533,10 +533,13 @@ def read_ndattr_scalar(path: Path, key: str) -> float | None:
 
 
 def read_ndattr_scalar_from_handle(handle: h5py.File, key: str) -> float | None:
-    full_key = f"{NDATTR_PREFIX}/{key}"
-    if full_key not in handle:
+    key = str(key).strip().lstrip("/")
+    candidates = [key] if "/" in key else []
+    candidates.append(f"{NDATTR_PREFIX}/{key}")
+    dataset_path = next((candidate for candidate in candidates if candidate in handle), None)
+    if dataset_path is None:
         return None
-    value = np.asarray(handle[full_key][()])
+    value = np.asarray(handle[dataset_path][()])
     if value.size == 0:
         return None
     return float(value.reshape(-1)[0])

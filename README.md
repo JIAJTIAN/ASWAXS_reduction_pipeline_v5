@@ -1,47 +1,123 @@
-﻿# ASWAXS Reduction Pipeline V5: Bluesky-Assisted Live Reduction
+﻿# ASWAXS Reduction Pipeline V5
 
-Version 5 continues the v3 experimental beamline/live pipeline with a
-Bluesky/Kafka-assisted queue layer. In v5, Bluesky emits a lightweight
-`measurement_done` message when one measurement is complete. A small bridge
-normalizes that message into a local reduction job queue. The ASWAXS reducer
-consumes queued jobs, scans the specified detector data directory, and applies
-the existing file-readiness and 2D-to-1D reduction logic. This keeps v2's
-well-tested reduction behavior while allowing beamline-server-triggered live
-SAXS/WAXS reduction during Bluesky-controlled acquisition.
+ASWAXS Reduction Pipeline V5 is a GUI-first post-processing platform for
+turning raw SAXS/WAXS/ASAXS HDF5 detector frames into analysis-ready I(q)
+curves, provenance-rich analysis HDF5 files, XAnoS-compatible text exports, and
+quality-control plots.
 
-The raw HDF5 files remain immutable experimental records. The reducer opens raw
-HDF5 only read-only and writes all reduction state, metadata, provenance, and
-history to the analysis HDF5 file and `live_events.jsonl`.
+The goal is to make beamline reduction feel like guided scientific software,
+not a folder-and-script exercise. A user can choose raw HDF5 files, define the
+sequence, assign detector calibration and monitor/PV normalization, run a task
+queue, inspect the final I(q), evaluate frame stability, export XAnoS-format
+data, and send ASAXS results into downstream component extraction.
 
-The demo uses a manifest replay as a stand-in for real acquisition:
+## Platform Story
 
-1. A frame arrives.
-2. The frame is immediately integrated to a 1D SAXS curve.
-3. When all frames for one `(energy, group)` are present, the group average starts.
-4. When all required groups for one energy are averaged, the per-energy ASAXS
-   correction starts.
+The platform is designed around the full post-acquisition workflow:
 
-Use `--analysis-mode asaxs` for the current ASAXS workflow. Use
-`--analysis-mode saxs` for normal SAXS mode, where the pipeline stops after 1D
-reduction and group averages.
+1. Select raw HDF5 files or a raw measurement folder.
+2. Choose SAXS-only or ASAXS/XAnoS reduction.
+3. Confirm the sequence: energies, groups, and frames.
+4. Select PONI, mask, monitor/PV normalization, and thickness metadata.
+5. Define SAXS output names or ASAXS sample/solvent pairs.
+6. Run one task or a queue of tasks with frame-level progress feedback.
+7. Review final curves and quality-control diagnostics in the GUI.
+8. Export XAnoS-compatible `.dat` files or open downstream XAnoS tools.
 
-V2 remains the stable pure folder-monitor, GUI, and replay version. V5 is the
-experimental beamline-server version. It still keeps the folder-monitor logic
-internally, but the preferred live trigger is now a queued `measurement_done`
-job from Bluesky/Kafka.
+This makes V5 useful both for beamtime batch reduction and for post-processing
+already-collected datasets.
+
+## Design Principles
+
+- **Raw data are read-only.** Raw HDF5 files are treated as immutable
+  experimental records. All derived data are written to `Extracted`/output
+  folders, analysis HDF5 files, and XAnoS-format exports.
+- **GUI-first workflow.** The main path is the guided Qt dashboard, task
+  builder, queue, plotter, and tools menu. Command-line scripts remain available
+  for testing and compatibility.
+- **Energy-aware ASAXS.** Each energy row may have its own q grid; viewer,
+  stitching, and export code use the matching q row.
+- **Traceable derived outputs.** The analysis HDF5 stores reduced curves,
+  metadata, detector provenance, source-file history, and processing records.
+- **Fresh reduction by default.** Restart behavior is task-scoped and avoids
+  deleting sibling task results in shared output folders.
+- **Downstream compatibility.** XAnoS-format `.dat` files are written for ASAXS
+  and SAXS-only reductions. ASAXS keeps energy-indexed filenames; SAXS-only uses
+  clean sample/output names.
+
+## What V5 Provides
+
+- Guided task builder with clickable steps.
+- Queue table for adding, editing, deleting, reordering, and running tasks.
+- Single-detector and dual-detector support for Pil300K and Eig1M.
+- SAXS-only and ASAXS reduction modes.
+- Parallel frame integration with per-task progress and ETA.
+- Detector stitching for SAXS/WAXS data, including q-gap scaling without adding
+  artificial points.
+- HDF5 I(q) viewer for SAXS, WAXS, combined, final, and unstitched curves.
+- Publication-style Matplotlib plotting with interactive zoom and coordinates.
+- Viewer-side background subtraction and sample/background pair outputs.
+- Frame-stability QC for post-averaging data-quality inspection.
+- HDF5 structure/metadata viewer.
+- pyFAI setup GUI launcher for PONI/mask work.
+- XAnoS Components integration for completed ASAXS tasks.
 
 ## Project Layout
 
 ```text
 ASWAXS_reduction_pipeline_v5/
+  run_gui.py             root launcher; run without entering scripts/
+  pyproject.toml         installable application definition
   docs/                  project notes
-  scripts/               run launchers; no install step needed
+  scripts/               compatibility and utility launchers
   src/aswaxs_live/       reducer, GUI, viewer, and copied reduction core
   outputs/               ignored local analysis output
 ```
 
-Run commands from `C:\Users\jiajtian\Documents\Playground`. The project is not
-installable yet; the launcher scripts add `src/` to Python's path.
+## Start the Application
+
+For a copied checkout, activate the Python environment and run from the project
+root:
+
+```powershell
+python run_gui.py
+```
+
+For a permanent command, install the checkout once from its root:
+
+```powershell
+python -m pip install -e .
+```
+
+After that, start the GUI from any directory with:
+
+```text
+aswaxs
+```
+
+The older `python scripts/run_gui.py` route remains available for compatibility.
+
+The main dashboard `Tools` menu opens the HDF5 I-q viewer, HDF5 structure and
+metadata viewer, and the pyFAI PONI/mask setup GUI. These tools no longer require
+opening their individual scripts.
+
+### SAXS Frame Stability QC
+
+The analysis HDF5 already preserves the raw-file history, sequence manifest,
+PONI, mask, detector path, monitor normalization, and q-integration settings.
+The HDF5 I-q viewer now has a separate `Frame Stability QC` tab. After averaging,
+select one energy/group series and the viewer re-integrates only those recorded
+raw frames in read-only mode, then presents:
+
+- frame overlays and an I_i(q)/I_1(q) heatmap;
+- invariant-like and low-q intensity ratios;
+- reduced chi-square and CorMap-style longest-run probability;
+- optional Guinier Rg/I(0) and peak-position/FWHM trends;
+- Good, Acceptable, and Bad labels plus a conservative initial stable-frame
+  averaging recommendation.
+
+The QC is post-averaging and advisory. It does not modify raw HDF5, replace the
+stored group average, or alter downstream ASAXS results.
 
 ## Create PONI and Mask Files
 
@@ -326,25 +402,25 @@ In sample-list mode, the monitor progress bar estimates total frames as
 the requested group/frame count, the reducer will wait on that sample and the
 remaining-time estimate will reflect the requested count.
 
-## Run the V3 GUI
+## Main Task Queue GUI
 
-The integrated GUI has three windows:
+The v5 application combines task creation, queue control, task progress, final
+curve preview, and HDF5 tools in one dashboard. After installation, start it
+from any directory with:
 
-- Window 0: parameter setup and reducer launch.
-- Window 1: acquisition/reduction process monitor.
-- Window 2: available 1D file list and selected-curve plot.
-
-Start it with:
-
-```powershell
-python .\ASWAXS_reduction_pipeline_v5\scripts\run_gui.py
+```text
+aswaxs
 ```
 
-The GUI can run either folder-watcher mode for live acquisition or manifest
-replay mode for already collected data.
-Window 0 remembers the last-used parameters in
-`.aswaxs_live_gui_settings.json` at the project root. That local settings file
-is ignored by git.
+For an uninstalled copied checkout, run this from the project root:
+
+```powershell
+python run_gui.py
+```
+
+The GUI remembers task-builder values in `aswaxs_v5_builder_settings.json` at
+the project root. That local settings file should remain outside published
+application changes.
 
 Resume mode validates the existing analysis HDF5 before reusing it. If HDF5
 metadata is damaged, for example after a crashed writer or interrupted copy, the

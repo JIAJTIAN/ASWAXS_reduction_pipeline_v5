@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from aswaxs_live.stitcher import ReductionRows, scale_high_q_to_low_q, stitch_one_row
+from aswaxs_live.stitcher import ReductionRows, paired_detector_analysis_h5s, scale_high_q_to_low_q, stitch_one_row
 
 
 def _power_curve(q, amplitude=1.0, exponent=-2.0, sigma_fraction=0.05):
@@ -69,3 +69,19 @@ def test_stitch_one_row_keeps_both_detectors_across_q_gap():
     assert high_count == 120
     assert set(source_detector.tolist()) == {"Pil300K", "Eig1M"}
     assert np.all(np.diff(stitched[:, 0]) > 0)
+
+
+def test_named_stitch_lookup_does_not_fall_back_to_sibling_task(tmp_path):
+    pil_dir = tmp_path / "Pil300K"
+    eig_dir = tmp_path / "Eig1M"
+    pil_dir.mkdir()
+    eig_dir.mkdir()
+    (pil_dir / "BCP1_0.1x0.1_Pil300K_analysis.h5").write_text("pil sibling", encoding="utf-8")
+    (eig_dir / "BCP1_0.1x0.1_Eig1M_analysis.h5").write_text("eig sibling", encoding="utf-8")
+
+    assert paired_detector_analysis_h5s(pil_dir, eig_dir, sample_names=["BCP1_0.2x0.2"]) == []
+
+    pairs = paired_detector_analysis_h5s(pil_dir, eig_dir, sample_names=["BCP1_0.1x0.1"])
+
+    assert len(pairs) == 1
+    assert pairs[0][0] == "BCP1_0.1x0.1"

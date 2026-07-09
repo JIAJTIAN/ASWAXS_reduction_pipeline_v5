@@ -17,7 +17,6 @@ from typing import Callable
 
 from aswaxs_live.stitcher import (
     StitchedAsaxsSettings,
-    find_analysis_h5,
     read_detector_group_averages,
     update_live_stitched_averages,
     write_stitched_asaxs_outputs,
@@ -64,6 +63,8 @@ class TaskSpec:
     cores: int = max(1, os.cpu_count() or 1)
     pattern: str = "*.h5"
     dataset_path: str = "entry/data/data"
+    pil300k_monitor_key: str = "SPDS"
+    eig1m_monitor_key: str = "WPDS"
     npt: int = 1000
     unit: str = "q_A^-1"
     asaxs_pairs: list[AsaxsPair] = field(default_factory=list)
@@ -130,6 +131,9 @@ class TaskSpec:
     def detector_output_dir(self, detector: str) -> Path:
         return self.output_path / detector
 
+    def detector_analysis_h5_path(self, detector: str) -> Path:
+        return self.detector_output_dir(detector) / f"{safe_name(self.task_name)}_{detector}_analysis.h5"
+
     def combined_h5_path(self) -> Path:
         return self.output_path / f"{safe_name(self.task_name)}_analysis.h5"
 
@@ -148,6 +152,9 @@ class TaskSpec:
 
     def is_asaxs_mode(self) -> bool:
         return str(self.reduction_mode or "asaxs") == "asaxs"
+
+    def is_saxs_mode(self) -> bool:
+        return str(self.reduction_mode or "asaxs") == "saxs"
 
     def xanos_output_name(self) -> str:
         """Return the task-level XAnos sample name.
@@ -200,9 +207,12 @@ def task_from_json(payload: dict[str, object]) -> TaskSpec:
     clean.setdefault("eig1m_files", [])
     clean.setdefault("detector_mode", "both")
     clean.setdefault("reduction_mode", "asaxs")
+    clean.setdefault("pil300k_monitor_key", "SPDS")
+    clean.setdefault("eig1m_monitor_key", "WPDS")
     saved_cores = int(clean.get("cores", 0) or 0)
-    if saved_cores <= 1 and max(1, os.cpu_count() or 1) > 1:
-        clean["cores"] = max(1, os.cpu_count() or 1)
+    cpu_count = max(1, os.cpu_count() or 1)
+    if saved_cores <= 1 and cpu_count > 1:
+        clean["cores"] = cpu_count
     return TaskSpec(**clean)
 
 
@@ -397,8 +407,8 @@ def _finish_saxs_only_task(task: TaskSpec, log: Callable[[str], None], progress:
     active = task.active_detectors()
     if len(active) == 1:
         detector = active[0]
-        detector_h5 = find_analysis_h5(task.detector_output_dir(detector))
-        if detector_h5 is None:
+        detector_h5 = task.detector_analysis_h5_path(detector)
+        if not detector_h5.is_file():
             raise RuntimeError(f"No {detector} analysis HDF5 was produced.")
         combined_h5 = task.combined_h5_path()
         if combined_h5.exists():
@@ -455,36 +465,43 @@ def _prepare_restart_outputs(task: TaskSpec, log: Callable[[str], None]) -> None
     if removed_root:
         log(f"{task.task_name}: restart removed {removed_root} previous task-level output record(s)")
     for detector in ("Pil300K", "Eig1M"):
-        removed = _clear_detector_output_records(task.detector_output_dir(detector))
+        removed = _clear_detector_output_records(task, detector)
         if removed:
             log(f"{task.task_name}: restart removed {removed} previous {detector} output record(s)")
 
 
-def _clear_detector_output_records(output_dir: Path) -> int:
-    """Remove derived detector outputs so stitching cannot pick up stale HDF5."""
+def _clear_detector_output_records(task: TaskSpec, detector: str) -> int:
+    """Remove current-task detector outputs so stitching cannot pick up stale HDF5."""
+    output_dir = task.detector_output_dir(detector)
     if not output_dir.exists():
         return 0
     removed = 0
-    file_patterns = [
-        "*_analysis.h5",
-        "*_analysis.hdf5",
+    current_task_files = [
+        task.detector_analysis_h5_path(detector),
+        output_dir / f"{safe_name(task.task_name)}_{detector}_analysis.hdf5",
+        output_dir / f"{safe_name(task.task_name)}_{detector}_selected_manifest.csv",
+    ]
+    for path in current_task_files:
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    shared_run_files = [
         "live_events.jsonl",
         "live_replay_manifest.csv",
         "live_sequence_manifest.csv",
-        "*_selected_manifest.csv",
         "group_summary.csv",
     ]
-    for pattern in file_patterns:
-        for path in output_dir.glob(pattern):
-            if path.is_file():
-                path.unlink()
-                removed += 1
+    for name in shared_run_files:
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
+            removed += 1
     return removed
 
 
 def _write_single_detector_asaxs_outputs(task: TaskSpec, detector: str) -> None:
-    detector_h5 = find_analysis_h5(task.detector_output_dir(detector))
-    if detector_h5 is None:
+    detector_h5 = task.detector_analysis_h5_path(detector)
+    if not detector_h5.is_file():
         raise RuntimeError(f"No {detector} analysis HDF5 was produced.")
     task.output_path.mkdir(parents=True, exist_ok=True)
     combined_h5 = task.combined_h5_path()
@@ -536,11 +553,10 @@ def _clear_task_output_records(task: TaskSpec) -> int:
     if not output_dir.exists():
         return 0
     removed = 0
-    for pattern in ("*_analysis.h5", "*_analysis.hdf5"):
-        for path in output_dir.glob(pattern):
-            if path.is_file():
-                path.unlink()
-                removed += 1
+    for path in (task.combined_h5_path(), output_dir / f"{safe_name(task.task_name)}_analysis.hdf5"):
+        if path.is_file():
+            path.unlink()
+            removed += 1
     _ensure_current_pair_xanos_outputs_writable(output_dir, task)
     return removed
 
@@ -791,6 +807,8 @@ def _detector_batch_command(
         str(mask),
         "--dataset-path",
         task.dataset_path,
+        "--monitor-key",
+        _detector_monitor_key(task, detector),
         "--npt",
         str(task.npt),
         "--jobs",
@@ -798,10 +816,18 @@ def _detector_batch_command(
         "--unit",
         task.unit,
         "--analysis-h5",
-        str(output_dir / f"{safe_name(task.task_name)}_{detector}_analysis.h5"),
+        str(task.detector_analysis_h5_path(detector)),
     ]
     cmd[4:4] = source_args
     return cmd
+
+
+def _detector_monitor_key(task: TaskSpec, detector: str) -> str:
+    if detector == "Pil300K":
+        return str(task.pil300k_monitor_key or "SPDS").strip() or "SPDS"
+    if detector == "Eig1M":
+        return str(task.eig1m_monitor_key or "WPDS").strip() or "WPDS"
+    return "SPDS"
 
 
 class _EventLogFrameMonitor:

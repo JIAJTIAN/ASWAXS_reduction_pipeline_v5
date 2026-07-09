@@ -559,6 +559,8 @@ def paired_detector_analysis_h5s(
         ]
     if shared_samples:
         return [(sample, pil300k_by_sample[sample], eig1m_by_sample[sample]) for sample in shared_samples]
+    if sample_names is not None:
+        return []
 
     pil300k_h5 = find_analysis_h5(pil300k_output_dir)
     eig1m_h5 = find_analysis_h5(eig1m_output_dir)

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aswaxs-reduction-pipeline"
+version = "5.0.0"
+description = "GUI-first ASWAXS and SAXS reduction pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fabio",
+    "h5py",
+    "matplotlib",
+    "numpy",
+    "pyFAI",
+    "pyqtgraph",
+    "pyzmq",
+    "PyQt5",
+    "kafka-python",
+    "bluesky-kafka",
+]
+
+[project.gui-scripts]
+aswaxs = "aswaxs_live.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

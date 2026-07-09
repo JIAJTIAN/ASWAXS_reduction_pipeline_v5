@@ -7,6 +7,9 @@ import sys
 import time
 from pathlib import Path
 
+from aswaxs_live.qt_runtime import suppress_glx_warning
+
+suppress_glx_warning()
 os.environ.setdefault("QT_API", "pyqt5")
 
 from PyQt5 import QtWidgets
@@ -18,6 +21,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from pyFAI import load as load_poni
+
+from aswaxs_live.ui_theme import apply_tool_theme, fit_window_to_available_screen
 
 from .io_utils import DEFAULT_DATASET_PATH, load_hdf5_image
 from .processing import (
@@ -42,7 +47,6 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
     def __init__(self, initial_path: str | None = None):
         super().__init__()
         self.setWindowTitle("ASWAXS pyFAI Setup")
-        self.resize(1680, 1020)
 
         self.current_file: Path | None = None
         self.current_image: np.ndarray | None = None
@@ -61,6 +65,8 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self._integrate_process = None
 
         self._build_ui()
+        apply_tool_theme(self)
+        fit_window_to_available_screen(self, (1680, 1020), minimum=(900, 640))
         if initial_path:
             self.load_hdf5_file(initial_path)
 
@@ -68,6 +74,8 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QHBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
         splitter = QtWidgets.QSplitter()
         root.addWidget(splitter)
@@ -115,6 +123,7 @@ class PreprocessingWindow(QtWidgets.QMainWindow):
         self._build_integrate_group()
 
         self.status_label = QtWidgets.QLabel("Load an HDF5 file to begin.")
+        self.status_label.setObjectName("ToolStatus")
         self.status_label.setWordWrap(True)
         left_layout.addWidget(self.status_label)
         left_layout.addStretch(1)

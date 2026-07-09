@@ -1,4 +1,4 @@
-"""Compatibility launcher for the ASWAXS GUI."""
+"""Run the ASWAXS GUI directly from a copied project folder."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import sys
 from pathlib import Path
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
 
 from aswaxs_live.app import main  # noqa: E402
 

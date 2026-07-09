@@ -30,11 +30,56 @@ from aswaxs_live.task_queue import (
     task_from_json,
     task_to_json,
 )
+from aswaxs_live.ui_theme import fit_window_to_available_screen
+from aswaxs_live.xanos_bridge import XAnoSBridgeError, open_xanos_components_window
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 BUILDER_SETTINGS_PATH = PROJECT_DIR / "aswaxs_v5_builder_settings.json"
 DETECTOR_PROGRESS_RE = re.compile(r"\b(Pil300K|Eig1M)\s+(\d+)/(\d+)\b")
+FRAME_STABILITY_HELP_PATH = PROJECT_DIR / "docs" / "frame_stability_qc.md"
+MONITOR_NAME_HINTS = ("pds", "pd", "i0", "ion", "monitor", "current", "diode", "counter", "ic")
+
+
+def _discover_monitor_candidate_names(handle: h5py.File) -> list[str]:
+    candidates: set[str] = set()
+
+    def visit(name: str, obj: object) -> None:
+        if isinstance(obj, h5py.Dataset) and _looks_like_monitor_dataset(name, obj):
+            candidates.add(Path(name).name)
+            candidates.add(name)
+        if isinstance(obj, (h5py.Dataset, h5py.Group)):
+            for attr_name, value in obj.attrs.items():
+                if _looks_like_monitor_name(attr_name) and _is_scalar_like(value):
+                    candidates.add(str(attr_name))
+
+    handle.visititems(visit)
+    return sorted(candidates, key=lambda value: (0 if _looks_like_monitor_name(value) else 1, value.lower()))
+
+
+def _looks_like_monitor_dataset(name: str, dataset: h5py.Dataset) -> bool:
+    if dataset.size > 16 or dataset.ndim > 1:
+        return False
+    if not _looks_like_monitor_name(name):
+        return False
+    try:
+        data = dataset[()]
+    except Exception:
+        return False
+    return _is_scalar_like(data)
+
+
+def _looks_like_monitor_name(name: str) -> bool:
+    lowered = str(name).lower()
+    return any(hint in lowered for hint in MONITOR_NAME_HINTS)
+
+
+def _is_scalar_like(value: object) -> bool:
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return False
+    return array.size <= 16 and array.ndim <= 1 and array.dtype.kind in {"i", "u", "f", "b"}
 
 
 class QueueTable(QtWidgets.QTableWidget):
@@ -166,11 +211,34 @@ class TaskRunner(QtCore.QThread):
         self.all_done.emit()
 
 
+class HelpDocumentDialog(QtWidgets.QDialog):
+    def __init__(self, title: str, path: Path, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        self.browser = QtWidgets.QTextBrowser()
+        self.browser.setOpenExternalLinks(True)
+        self.browser.document().setDefaultStyleSheet(
+            "body { color: #20242a; font-family: sans-serif; line-height: 1.35; }"
+            "h1, h2, h3 { color: #1f4f7f; }"
+            "code { background: #eef1f5; color: #20242a; }"
+        )
+        layout.addWidget(self.browser)
+        close_button = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close_button.rejected.connect(self.close)
+        layout.addWidget(close_button)
+        try:
+            self.browser.setMarkdown(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            self.browser.setPlainText(f"Could not open help document:\n{path}\n\n{exc}")
+        fit_window_to_available_screen(self, (1040, 820), minimum=(720, 520))
+
+
 class DashboardWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ASWAXS v5")
-        self.resize(1480, 900)
         self.tasks: list[TaskSpec] = []
         self.log_messages: list[str] = []
         self.queue_path = DEFAULT_QUEUE_PATH
@@ -179,13 +247,22 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._queue_selection_mode = QtWidgets.QAbstractItemView.ExtendedSelection
         self.h5_iq_viewer: H5IqViewerDialog | None = None
         self.h5_structure_viewer: H5StructureViewerDialog | None = None
+        self.pyfai_setup_window: QtWidgets.QMainWindow | None = None
+        self.xanos_components_window: QtWidgets.QWidget | None = None
+        self.frame_stability_help_dialog: HelpDocumentDialog | None = None
+        self.last_successful_task_index: int | None = None
         self.active_run_indices: list[int] = []
         self.editing_index: int | None = None
         self._loading_builder_settings = False
         self._output_dir_manually_overridden = False
+        self._monitor_pv_scan_signature: tuple[str, str, str] | None = None
         self._build_ui()
         self.load_builder_settings()
         self._load_default_queue()
+        self._fit_to_available_screen()
+
+    def _fit_to_available_screen(self) -> None:
+        fit_window_to_available_screen(self, (1480, 900), minimum=(900, 560), margin=72)
 
     def _build_ui(self) -> None:
         self._build_actions()
@@ -203,8 +280,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.tabs.setDocumentMode(True)
         root.addWidget(self.tabs, 1)
 
-        self._build_dashboard_tab()
         self._build_task_builder_tab()
+        self._build_dashboard_tab()
 
         self.curve_refresh_timer = QtCore.QTimer(self)
         self.curve_refresh_timer.setInterval(5000)
@@ -237,7 +314,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 spacing: 4px;
                 padding: 4px 6px;
             }
-            QToolButton {
+            QToolBar QToolButton {
                 background: #ffffff;
                 border: 1px solid #b9c0ca;
                 border-radius: 3px;
@@ -245,17 +322,36 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 padding: 4px 9px;
                 min-height: 20px;
             }
-            QToolButton:hover {
+            QToolBar QToolButton:hover {
                 background: #edf4fd;
                 border-color: #6f9ac8;
             }
-            QToolButton:pressed {
+            QToolBar QToolButton:pressed {
                 background: #d9e8f7;
             }
-            QToolButton:disabled {
+            QToolBar QToolButton#PrimaryActionButton {
+                background: #2f6fae;
+                border-color: #245c91;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QToolBar QToolButton#PrimaryActionButton:hover {
+                background: #245f99;
+                border-color: #194f83;
+            }
+            QToolBar QToolButton#PrimaryActionButton:pressed {
+                background: #1d4f80;
+            }
+            QToolBar QToolButton:disabled {
                 background: #e5e7eb;
                 color: #8a9099;
                 border-color: #cdd2da;
+            }
+            QFileDialog QToolButton {
+                min-width: 26px;
+                min-height: 26px;
+                padding: 2px;
+                qproperty-iconSize: 20px 20px;
             }
             QGroupBox {
                 background: #ffffff;
@@ -334,6 +430,56 @@ class DashboardWindow(QtWidgets.QMainWindow):
             QPushButton:pressed {
                 background: #d9e8f7;
             }
+            QPushButton#PrimaryActionButton {
+                background: #2f6fae;
+                border-color: #245c91;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton#PrimaryActionButton:hover {
+                background: #245f99;
+                border-color: #194f83;
+            }
+            QPushButton#PrimaryActionButton:pressed {
+                background: #1d4f80;
+            }
+            QFrame#BuilderStepTrack {
+                background: #eef2f6;
+                border: 1px solid #c8ccd2;
+                border-radius: 3px;
+                padding: 5px 8px;
+            }
+            QPushButton#BuilderStepButton {
+                background: transparent;
+                border: 1px solid transparent;
+                color: #707780;
+                font-weight: 500;
+                padding: 5px 8px;
+                text-align: left;
+            }
+            QPushButton#BuilderStepButton:hover {
+                background: #ffffff;
+                border-color: #b9c8d8;
+                color: #245f99;
+            }
+            QPushButton#BuilderStepButton[current="true"] {
+                background: #ffffff;
+                border-color: #8fb2d6;
+                color: #245f99;
+                font-weight: 700;
+            }
+            QLabel#BuilderStepTitle {
+                color: #1f4f7f;
+                font-size: 15px;
+                font-weight: 600;
+                padding: 2px 0 8px 0;
+            }
+            QLabel#BuilderReview {
+                background: #f7f9fb;
+                border: 1px solid #d9dde3;
+                border-radius: 3px;
+                padding: 10px;
+            }
             QProgressBar {
                 background: #ffffff;
                 border: 1px solid #b9c0ca;
@@ -404,6 +550,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.h5_iq_viewer_action.triggered.connect(self.open_h5_iq_viewer)
         self.h5_structure_viewer_action = QtWidgets.QAction("HDF5 Structure / Metadata Viewer", self)
         self.h5_structure_viewer_action.triggered.connect(self.open_h5_structure_viewer)
+        self.pyfai_setup_action = QtWidgets.QAction("pyFAI PONI / Mask Setup", self)
+        self.pyfai_setup_action.triggered.connect(self.open_pyfai_setup)
+        self.xanos_components_action = QtWidgets.QAction("XAnoS Components", self)
+        self.xanos_components_action.triggered.connect(self.open_xanos_components)
+        self.send_to_xanos_action = QtWidgets.QAction("Send to XAnoS Components", self)
+        self.send_to_xanos_action.triggered.connect(self.send_selected_task_to_xanos)
+        self.frame_stability_help_action = QtWidgets.QAction("Frame Stability QC Guide", self)
+        self.frame_stability_help_action.triggered.connect(self.open_frame_stability_help)
     def _build_menus(self) -> None:
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
@@ -416,8 +570,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         task_menu = menu.addMenu("Task")
         task_menu.addActions([
             self.new_task_action,
-            self.add_to_queue_action,
-            self.update_task_action,
             self.edit_task_action,
         ])
         task_menu.addSeparator()
@@ -434,7 +586,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         task_menu.addAction(self.remove_task_action)
 
         view_menu = menu.addMenu("View")
-        for index, label in enumerate(["Dashboard", "Task Builder"]):
+        for index, label in enumerate(["Task Builder", "Dashboard"]):
             action = QtWidgets.QAction(label, self)
             action.triggered.connect(lambda _checked=False, tab=index: self.tabs.setCurrentIndex(tab))
             view_menu.addAction(action)
@@ -442,8 +594,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
         tools_menu = menu.addMenu("Tools")
         tools_menu.addAction(self.h5_iq_viewer_action)
         tools_menu.addAction(self.h5_structure_viewer_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.xanos_components_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.pyfai_setup_action)
 
         help_menu = menu.addMenu("Help")
+        help_menu.addAction(self.frame_stability_help_action)
+        help_menu.addSeparator()
         help_menu.addAction("About ASWAXS v5", self.about)
 
     def _build_queue_toolbar(self) -> None:
@@ -452,10 +610,12 @@ class DashboardWindow(QtWidgets.QMainWindow):
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self._add_toolbar_label(toolbar, "Task")
         toolbar.addAction(self.new_task_action)
-        toolbar.addAction(self.add_to_queue_action)
         toolbar.addSeparator()
         self._add_toolbar_label(toolbar, "Queue")
         toolbar.addAction(self.run_all_action)
+        start_queue_button = toolbar.widgetForAction(self.run_all_action)
+        if start_queue_button is not None:
+            start_queue_button.setObjectName("PrimaryActionButton")
         toolbar.addAction(self.stop_current_action)
         toolbar.addAction(self.clear_queue_action)
         toolbar.addSeparator()
@@ -628,8 +788,48 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _build_task_builder_tab(self) -> None:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
-        form = QtWidgets.QFormLayout()
-        layout.addLayout(form)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        self.builder_step_titles = ["Raw Data", "Task Type", "Sequence", "Calibration", "Samples & Finish"]
+        self.builder_step_track = QtWidgets.QFrame()
+        self.builder_step_track.setObjectName("BuilderStepTrack")
+        step_track_layout = QtWidgets.QHBoxLayout(self.builder_step_track)
+        step_track_layout.setContentsMargins(6, 4, 6, 4)
+        step_track_layout.setSpacing(4)
+        self.builder_step_buttons: list[QtWidgets.QPushButton] = []
+        for step_index, title in enumerate(self.builder_step_titles):
+            button = QtWidgets.QPushButton(f"{step_index + 1}. {title}")
+            button.setObjectName("BuilderStepButton")
+            button.setFlat(True)
+            button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setToolTip(f"Jump to step {step_index + 1}: {title}")
+            button.clicked.connect(lambda _checked=False, index=step_index: self._builder_go_to_step(index))
+            self.builder_step_buttons.append(button)
+            step_track_layout.addWidget(button)
+            if step_index < len(self.builder_step_titles) - 1:
+                separator = QtWidgets.QLabel(">")
+                separator.setStyleSheet("color: #9aa3ad; font-weight: 600;")
+                step_track_layout.addWidget(separator)
+        step_track_layout.addStretch(1)
+        layout.addWidget(self.builder_step_track)
+
+        self.builder_stack = QtWidgets.QStackedWidget()
+        layout.addWidget(self.builder_stack, 1)
+
+        def step_page(title: str) -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+            content = QtWidgets.QWidget()
+            content_layout = QtWidgets.QVBoxLayout(content)
+            content_layout.setContentsMargins(10, 8, 10, 8)
+            heading = QtWidgets.QLabel(title)
+            heading.setObjectName("BuilderStepTitle")
+            content_layout.addWidget(heading)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setWidget(content)
+            self.builder_stack.addWidget(scroll)
+            return content, content_layout
 
         self.task_name_edit = QtWidgets.QLineEdit()
         self.raw_folder_edit = QtWidgets.QLineEdit()
@@ -646,6 +846,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.reduction_mode_combo = QtWidgets.QComboBox()
         self.reduction_mode_combo.addItem("ASAXS / XAnos", "asaxs")
         self.reduction_mode_combo.addItem("SAXS only", "saxs")
+
+        _type_page, type_layout = step_page("Choose the reduction task")
+        type_form = QtWidgets.QFormLayout()
+        type_form.addRow("Task name", self.task_name_edit)
+        type_form.addRow("Reduction mode", self.reduction_mode_combo)
+        type_form.addRow("Detector mode", self.detector_mode_combo)
+        type_layout.addLayout(type_form)
+        type_layout.addStretch(1)
 
         self.pil_files_edit = QtWidgets.QPlainTextEdit()
         self.pil_files_edit.setPlaceholderText("Choose Pil300K raw .h5 files, one path per line.")
@@ -685,6 +893,17 @@ class DashboardWindow(QtWidgets.QMainWindow):
         counts_row.addWidget(self.eig_count_label)
         counts_row.addStretch(1)
 
+        _raw_page, raw_layout = step_page("Select the raw HDF5 data")
+        raw_form = QtWidgets.QFormLayout()
+        raw_form.addRow("Raw folder fallback", raw_row)
+        raw_form.addRow("Pil300K raw HDF5 files", self.pil_files_edit)
+        raw_form.addRow("", pil_file_buttons)
+        raw_form.addRow("Eig1M raw HDF5 files", self.eig_files_edit)
+        raw_form.addRow("", eig_file_buttons)
+        raw_form.addRow("File counts", counts_row)
+        raw_layout.addLayout(raw_form)
+        raw_layout.addStretch(1)
+
         self.energy_spin = self._spin(1, 999, 20)
         self.group_spin = self._spin(1, 999, 13)
         self.frame_spin = self._spin(1, 999, 10)
@@ -694,21 +913,80 @@ class DashboardWindow(QtWidgets.QMainWindow):
             sequence_row.addWidget(widget)
         sequence_row.addStretch(1)
 
+        _sequence_page, sequence_layout = step_page("Confirm sequence and output")
+        sequence_form = QtWidgets.QFormLayout()
+        sequence_form.addRow("Sequence", sequence_row)
+        sequence_form.addRow("Output folder (auto)", output_row)
+        sequence_layout.addLayout(sequence_form)
+        sequence_layout.addStretch(1)
+
         self.pil_poni_edit = QtWidgets.QLineEdit()
         self.pil_mask_edit = QtWidgets.QLineEdit()
         self.eig_poni_edit = QtWidgets.QLineEdit()
         self.eig_mask_edit = QtWidgets.QLineEdit()
+        self.pil_monitor_combo = QtWidgets.QComboBox()
+        self.pil_monitor_combo.setEditable(True)
+        self.pil_monitor_combo.addItems(["SPDS", "SPD", "I0", "ion_chamber", "monitor"])
+        self.pil_monitor_combo.setCurrentText("SPDS")
+        self.pil_monitor_combo.setToolTip("HDF5 metadata/PV key used to normalize Pil300K/SAXS frames.")
+        self.eig_monitor_combo = QtWidgets.QComboBox()
+        self.eig_monitor_combo.setEditable(True)
+        self.eig_monitor_combo.addItems(["WPDS", "WPD", "I0", "ion_chamber", "monitor"])
+        self.eig_monitor_combo.setCurrentText("WPDS")
+        self.eig_monitor_combo.setToolTip("HDF5 metadata/PV key used to normalize Eig1M/WAXS frames.")
+        scan_monitor_button = QtWidgets.QPushButton("Scan PVs from HDF5")
+        scan_monitor_button.clicked.connect(self.scan_monitor_pvs_from_h5)
+        monitor_row = QtWidgets.QHBoxLayout()
+        monitor_row.addWidget(QtWidgets.QLabel("Pil300K/SAXS"))
+        monitor_row.addWidget(self.pil_monitor_combo, 1)
+        monitor_row.addWidget(QtWidgets.QLabel("Eig1M/WAXS"))
+        monitor_row.addWidget(self.eig_monitor_combo, 1)
+        monitor_row.addWidget(scan_monitor_button)
         pil_poni_row = self._file_browse_row(self.pil_poni_edit, "Choose Pil300K PONI", "PONI files (*.poni);;All files (*)")
         pil_mask_row = self._file_browse_row(self.pil_mask_edit, "Choose Pil300K mask", "Mask files (*.msk *.edf *.npy);;All files (*)")
         eig_poni_row = self._file_browse_row(self.eig_poni_edit, "Choose Eig1M PONI", "PONI files (*.poni);;All files (*)")
         eig_mask_row = self._file_browse_row(self.eig_mask_edit, "Choose Eig1M mask", "Mask files (*.msk *.edf *.npy);;All files (*)")
         self.capillary_spin = self._double_spin(0.0001, 100.0, 0.15)
         self.gc_thickness_spin = self._double_spin(0.0001, 100.0, 0.1055)
+        self.capillary_spin.setToolTip(
+            "Sample/tube path thickness stored in XAnoS output for downstream CF/thickness scaling."
+        )
+        self.gc_thickness_spin.setToolTip(
+            "Glassy-carbon standard thickness used when fitting the calibration factor (CF)."
+        )
         self.gc_group_spin = self._spin(0, 999, 1)
         self.air_group_spin = self._spin(0, 999, 2)
         self.empty_group_spin = self._spin(0, 999, 3)
-        cpu_count = max(1, os.cpu_count() or 1)
-        self.core_spin = self._spin(1, cpu_count, cpu_count)
+        self.available_cores = max(1, os.cpu_count() or 1)
+        self.core_spin = self._spin(1, self.available_cores, self.available_cores)
+        self.core_spin.setToolTip(f"Detected CPU cores: {self.available_cores}")
+        self.core_limit_label = QtWidgets.QLabel(f"available: {self.available_cores}")
+        self.core_limit_label.setObjectName("BuilderReview")
+
+        _calibration_page, calibration_layout = step_page("Set detector calibration and reduction parameters")
+        calibration_form = QtWidgets.QFormLayout()
+        calibration_form.addRow("Pil300K PONI", pil_poni_row)
+        calibration_form.addRow("Pil300K mask", pil_mask_row)
+        calibration_form.addRow("Eig1M PONI", eig_poni_row)
+        calibration_form.addRow("Eig1M mask", eig_mask_row)
+        calibration_help = QtWidgets.QLabel(
+            "PONI defines detector geometry; masks exclude invalid pixels. Sample thickness is the sample/tube "
+            "path length stored for downstream XAnoS CF/thickness scaling; it is not applied to the exported "
+            "intensity here. GC thickness is used when fitting the glassy-carbon calibration factor."
+        )
+        calibration_help.setWordWrap(True)
+        calibration_help.setObjectName("BuilderReview")
+        calibration_layout.addWidget(calibration_help)
+        calibration_form.addRow("Sample thickness", self.capillary_spin)
+        calibration_form.addRow("GC thickness", self.gc_thickness_spin)
+        calibration_form.addRow("Monitor/PV normalization", monitor_row)
+        core_row = QtWidgets.QHBoxLayout()
+        core_row.addWidget(self.core_spin)
+        core_row.addWidget(self.core_limit_label)
+        core_row.addStretch(1)
+        calibration_form.addRow("CPU cores", core_row)
+        calibration_layout.addLayout(calibration_form)
+        calibration_layout.addStretch(1)
 
         self.pair_table = QtWidgets.QTableWidget(0, 3)
         self.pair_table.setHorizontalHeaderLabels(["Output name", "Sample group", "Solvent group"])
@@ -728,47 +1006,105 @@ class DashboardWindow(QtWidgets.QMainWindow):
         pair_buttons.addWidget(clear_pair)
         pair_buttons.addStretch(1)
 
-        add_task = QtWidgets.QPushButton("Add Task to Queue")
-        add_task.clicked.connect(self.add_task_from_builder)
-        self.update_task_button = QtWidgets.QPushButton("Update Selected Task")
-        self.update_task_button.clicked.connect(self.update_selected_task_from_builder)
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.addWidget(add_task)
-        buttons.addWidget(self.update_task_button)
-        buttons.addStretch(1)
-
-        form.addRow("Task name", self.task_name_edit)
-        form.addRow("Raw folder fallback", raw_row)
-        form.addRow("Detector mode", self.detector_mode_combo)
-        form.addRow("Reduction mode", self.reduction_mode_combo)
-        form.addRow("Pil300K raw HDF5 files", self.pil_files_edit)
-        form.addRow("", pil_file_buttons)
-        form.addRow("Eig1M raw HDF5 files", self.eig_files_edit)
-        form.addRow("", eig_file_buttons)
-        form.addRow("Output folder (auto)", output_row)
-        form.addRow("File counts", counts_row)
-        form.addRow("Sequence", sequence_row)
-        form.addRow("Pil300K PONI", pil_poni_row)
-        form.addRow("Pil300K mask", pil_mask_row)
-        form.addRow("Eig1M PONI", eig_poni_row)
-        form.addRow("Eig1M mask", eig_mask_row)
-        form.addRow("Capillary thickness", self.capillary_spin)
-        form.addRow("GC thickness", self.gc_thickness_spin)
-        form.addRow("GC group", self.gc_group_spin)
-        form.addRow("Air group", self.air_group_spin)
-        form.addRow("Empty group", self.empty_group_spin)
-        form.addRow("CPU cores", self.core_spin)
+        _samples_page, samples_layout = step_page("Define outputs and finish")
+        group_roles = QtWidgets.QGroupBox("Sequence Group Roles")
+        group_roles_form = QtWidgets.QFormLayout(group_roles)
+        group_roles_help = QtWidgets.QLabel(
+            "GC, air, and empty are 1-based sequence group numbers used to build the reduced outputs. "
+            "Use 0 when a role is absent."
+        )
+        group_roles_help.setWordWrap(True)
+        group_roles_help.setObjectName("BuilderReview")
+        group_roles_form.addRow(group_roles_help)
+        group_roles_form.addRow("GC group", self.gc_group_spin)
+        group_roles_form.addRow("Air group", self.air_group_spin)
+        group_roles_form.addRow("Empty group", self.empty_group_spin)
+        samples_layout.addWidget(group_roles)
         self.pair_table_label = QtWidgets.QLabel("ASAXS sample/solvent pairs")
-        layout.addWidget(self.pair_table_label)
-        layout.addWidget(self.pair_table)
-        layout.addLayout(pair_buttons)
-        layout.addLayout(buttons)
-        layout.addStretch(1)
+        samples_layout.addWidget(self.pair_table_label)
+        samples_layout.addWidget(self.pair_table, 1)
+        samples_layout.addLayout(pair_buttons)
+        self.builder_review_label = QtWidgets.QLabel()
+        self.builder_review_label.setObjectName("BuilderReview")
+        self.builder_review_label.setWordWrap(True)
+        samples_layout.addWidget(self.builder_review_label)
+
+        self.add_task_button = QtWidgets.QPushButton("Add Task to Queue")
+        self.add_task_button.setObjectName("PrimaryActionButton")
+        self.add_task_button.clicked.connect(self.add_task_from_builder)
+        self.update_task_button = QtWidgets.QPushButton("Update Selected Task")
+        self.update_task_button.setObjectName("PrimaryActionButton")
+        self.update_task_button.clicked.connect(self.update_selected_task_from_builder)
+
+        navigation = QtWidgets.QHBoxLayout()
+        self.builder_back_button = QtWidgets.QPushButton("Back")
+        self.builder_back_button.clicked.connect(self._builder_back)
+        self.builder_next_button = QtWidgets.QPushButton("Next")
+        self.builder_next_button.setObjectName("PrimaryActionButton")
+        self.builder_next_button.clicked.connect(self._builder_next)
+        navigation.addWidget(self.builder_back_button)
+        navigation.addStretch(1)
+        navigation.addWidget(self.add_task_button)
+        navigation.addWidget(self.update_task_button)
+        navigation.addWidget(self.builder_next_button)
+        layout.addLayout(navigation)
 
         self._append_pair_row("10pYb", "5", "4")
         self._append_pair_row("5pYb", "6", "4")
         self._connect_builder_autosave()
+        raw_step = self.builder_stack.widget(1)
+        self.builder_stack.removeWidget(raw_step)
+        self.builder_stack.insertWidget(0, raw_step)
+        self._set_builder_step(0)
         self.tabs.addTab(page, "Task Builder")
+
+    def _set_builder_step(self, index: int) -> None:
+        index = max(0, min(index, len(self.builder_step_titles) - 1))
+        self.builder_stack.setCurrentIndex(index)
+        for step_index, button in enumerate(self.builder_step_buttons):
+            button.setProperty("current", step_index == index)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        final_step = index == len(self.builder_step_titles) - 1
+        self.builder_back_button.setEnabled(index > 0)
+        self.builder_next_button.setVisible(not final_step)
+        self.add_task_button.setVisible(final_step and self.editing_index is None)
+        self.update_task_button.setVisible(final_step and self.editing_index is not None)
+        if index == 3:
+            self.scan_monitor_pvs_from_h5(force=False, silent=True)
+        if final_step:
+            self._update_builder_review()
+
+    def _builder_back(self) -> None:
+        self._set_builder_step(self.builder_stack.currentIndex() - 1)
+
+    def _builder_next(self) -> None:
+        self._prepare_builder_before_leaving_raw_step(self.builder_stack.currentIndex() + 1)
+        self._set_builder_step(self.builder_stack.currentIndex() + 1)
+
+    def _builder_go_to_step(self, index: int) -> None:
+        self._prepare_builder_before_leaving_raw_step(index)
+        self._set_builder_step(index)
+
+    def _prepare_builder_before_leaving_raw_step(self, target_index: int) -> None:
+        if self.builder_stack.currentIndex() == 0:
+            if target_index <= 0:
+                return
+            self.scan_builder_folder()
+            self._autofill_task_name_from_source()
+
+    def _update_builder_review(self) -> None:
+        mode = self.reduction_mode_combo.currentText()
+        detectors = self.detector_mode_combo.currentText()
+        task_name = self.task_name_edit.text().strip() or "Unnamed task"
+        source_count = len(self._files_from_edit(self.pil_files_edit)) + len(self._files_from_edit(self.eig_files_edit))
+        source = f"{source_count} selected HDF5 files" if source_count else "raw folder fallback"
+        action = "Update the selected queue task" if self.editing_index is not None else "Add this task to the queue"
+        self.builder_review_label.setText(
+            f"<b>{task_name}</b><br>{mode} | {detectors} | {source}<br>"
+            f"{self.energy_spin.value()} energies | {self.group_spin.value()} groups | "
+            f"{self.frame_spin.value()} frames per measurement<br><br>{action}. Final validation runs before submission."
+        )
 
     @staticmethod
     def _spin(low: int, high: int, value: int) -> QtWidgets.QSpinBox:
@@ -815,9 +1151,12 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.eig_mask_edit,
         ]:
             edit.textChanged.connect(self.schedule_save_builder_settings)
+        self.pil_monitor_combo.currentTextChanged.connect(self.schedule_save_builder_settings)
+        self.eig_monitor_combo.currentTextChanged.connect(self.schedule_save_builder_settings)
         self.detector_mode_combo.currentIndexChanged.connect(self._detector_mode_changed)
         self.reduction_mode_combo.currentIndexChanged.connect(self._reduction_mode_changed)
         self.raw_folder_edit.textChanged.connect(self._raw_folder_changed)
+        self.raw_folder_edit.editingFinished.connect(self._autofill_task_name_from_source)
         for edit in [self.pil_files_edit, self.eig_files_edit]:
             edit.textChanged.connect(self._selected_files_changed)
         for spin in [
@@ -864,6 +1203,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             "pil300k_mask": self.pil_mask_edit.text(),
             "eig1m_poni": self.eig_poni_edit.text(),
             "eig1m_mask": self.eig_mask_edit.text(),
+            "pil300k_monitor_key": self.pil_monitor_combo.currentText(),
+            "eig1m_monitor_key": self.eig_monitor_combo.currentText(),
             "capillary_thickness": self.capillary_spin.value(),
             "gc_thickness": self.gc_thickness_spin.value(),
             "gc_group": self.gc_group_spin.value(),
@@ -910,15 +1251,17 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.pil_mask_edit.setText(str(payload.get("pil300k_mask", self.pil_mask_edit.text())))
             self.eig_poni_edit.setText(str(payload.get("eig1m_poni", self.eig_poni_edit.text())))
             self.eig_mask_edit.setText(str(payload.get("eig1m_mask", self.eig_mask_edit.text())))
+            self._set_combo_text(self.pil_monitor_combo, str(payload.get("pil300k_monitor_key", "SPDS")))
+            self._set_combo_text(self.eig_monitor_combo, str(payload.get("eig1m_monitor_key", "WPDS")))
             self.capillary_spin.setValue(float(payload.get("capillary_thickness", self.capillary_spin.value())))
             self.gc_thickness_spin.setValue(float(payload.get("gc_thickness", self.gc_thickness_spin.value())))
             self.gc_group_spin.setValue(int(payload.get("gc_group", self.gc_group_spin.value())))
             self.air_group_spin.setValue(int(payload.get("air_group", self.air_group_spin.value())))
             self.empty_group_spin.setValue(int(payload.get("empty_group", self.empty_group_spin.value())))
             saved_cores = int(payload.get("cores", self.core_spin.value()))
-            if saved_cores <= 1 and max(1, os.cpu_count() or 1) > 1:
-                saved_cores = max(1, os.cpu_count() or 1)
-            self.core_spin.setValue(saved_cores)
+            if saved_cores <= 1 and self.available_cores > 1:
+                saved_cores = self.available_cores
+            self.core_spin.setValue(min(max(1, saved_cores), self.available_cores))
             pairs = payload.get("pairs")
             if isinstance(pairs, list):
                 self.pair_table.setRowCount(0)
@@ -951,6 +1294,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.detector_mode_combo.setCurrentIndex(max(0, index))
 
     def _detector_mode_changed(self) -> None:
+        self._monitor_pv_scan_signature = None
         self.scan_builder_folder()
         self.schedule_save_builder_settings()
 
@@ -1086,6 +1430,13 @@ class DashboardWindow(QtWidgets.QMainWindow):
         raw = self.raw_folder_edit.text().strip()
         return Path(raw).expanduser() if raw else None
 
+    def _autofill_task_name_from_source(self) -> None:
+        if self.task_name_edit.text().strip():
+            return
+        sample_root = self._builder_sample_root()
+        if sample_root is not None and sample_root.name:
+            self.task_name_edit.setText(sample_root.name)
+
     @staticmethod
     def _sample_root_from_files(files: list[str]) -> Path | None:
         folder = DashboardWindow._common_parent(files)
@@ -1118,12 +1469,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.eig_count_label.setText(f"Eig1M: {eig} ({source})")
 
     def _selected_files_changed(self) -> None:
+        self._monitor_pv_scan_signature = None
         if not self._loading_builder_settings:
             self._update_auto_output_dir(force=True)
         self.scan_builder_folder()
         self.schedule_save_builder_settings()
 
     def _raw_folder_changed(self) -> None:
+        self._monitor_pv_scan_signature = None
         if not self._loading_builder_settings:
             raw = self.raw_folder_edit.text().strip()
             self._update_auto_output_dir(sample_root=Path(raw) if raw else None)
@@ -1138,6 +1491,75 @@ class DashboardWindow(QtWidgets.QMainWindow):
             edit.setPlainText("\n".join(str(path) for path in files if str(path).strip()))
         else:
             edit.clear()
+
+    @staticmethod
+    def _set_combo_text(combo: QtWidgets.QComboBox, value: str) -> None:
+        text = str(value).strip()
+        if text and combo.findText(text) < 0:
+            combo.addItem(text)
+        combo.setCurrentText(text)
+
+    def scan_monitor_pvs_from_h5(self, _checked: bool = False, *, force: bool = True, silent: bool = False) -> None:
+        signature = self._monitor_pv_source_signature()
+        if not force and signature == self._monitor_pv_scan_signature:
+            return
+        self._monitor_pv_scan_signature = signature
+        pil_candidates = self._monitor_candidates_for_detector("Pil300K")
+        eig_candidates = self._monitor_candidates_for_detector("Eig1M")
+        self._add_combo_candidates(self.pil_monitor_combo, pil_candidates)
+        self._add_combo_candidates(self.eig_monitor_combo, eig_candidates)
+        message_parts = []
+        if pil_candidates:
+            message_parts.append(f"Pil300K: {len(pil_candidates)} candidate(s)")
+        if eig_candidates:
+            message_parts.append(f"Eig1M: {len(eig_candidates)} candidate(s)")
+        message = "; ".join(message_parts) if message_parts else "No scalar monitor/PV candidates found in selected raw HDF5 files."
+        if not silent or pil_candidates or eig_candidates:
+            self.statusBar().showMessage(message)
+            self.log(f"Monitor/PV scan: {message}")
+
+    def _monitor_pv_source_signature(self) -> tuple[str, str, str]:
+        pil = self._first_h5_for_detector("Pil300K")
+        eig = self._first_h5_for_detector("Eig1M")
+        return (
+            str(self.detector_mode_combo.currentData() or "both"),
+            str(pil or ""),
+            str(eig or ""),
+        )
+
+    def _monitor_candidates_for_detector(self, detector: str) -> list[str]:
+        source = self._first_h5_for_detector(detector)
+        if source is None:
+            return []
+        try:
+            with h5py.File(source, "r") as handle:
+                return _discover_monitor_candidate_names(handle)
+        except Exception as exc:  # noqa: BLE001 - show scan failure without blocking task setup.
+            self.log(f"Could not scan {detector} monitor/PV names from {source}: {exc}")
+            return []
+
+    def _first_h5_for_detector(self, detector: str) -> Path | None:
+        edit = self.pil_files_edit if detector == "Pil300K" else self.eig_files_edit
+        files = self._files_from_edit(edit)
+        if files:
+            path = Path(files[0]).expanduser()
+            return path if path.exists() else None
+        raw_folder = self.raw_folder_edit.text().strip()
+        if not raw_folder:
+            return None
+        detector_dir = Path(raw_folder).expanduser() / detector
+        if not detector_dir.exists():
+            return None
+        return next((path for path in sorted(detector_dir.glob("*.h5")) if path.is_file()), None)
+
+    @staticmethod
+    def _add_combo_candidates(combo: QtWidgets.QComboBox, candidates: list[str]) -> None:
+        current = combo.currentText().strip()
+        for candidate in candidates:
+            if combo.findText(candidate) < 0:
+                combo.addItem(candidate)
+        if current:
+            combo.setCurrentText(current)
 
     def builder_task(self) -> TaskSpec:
         self.scan_builder_folder()
@@ -1178,6 +1600,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             pil300k_mask=self.pil_mask_edit.text().strip(),
             eig1m_poni=self.eig_poni_edit.text().strip(),
             eig1m_mask=self.eig_mask_edit.text().strip(),
+            pil300k_monitor_key=self.pil_monitor_combo.currentText().strip() or "SPDS",
+            eig1m_monitor_key=self.eig_monitor_combo.currentText().strip() or "WPDS",
             pil300k_files=pil_files,
             eig1m_files=eig_files,
             detector_mode=str(self.detector_mode_combo.currentData() or "both"),
@@ -1215,7 +1639,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.refresh_queue(select_row=new_index)
         self.queue_table.scrollToItem(self.queue_table.item(new_index, 0))
         self.log(f"Added task: {task.task_name} ({message})")
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(1)
         if ok:
             self.statusBar().showMessage(f"Added task to queue: {task.task_name}")
         else:
@@ -1240,7 +1664,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.editing_index = None
         self.refresh_queue(select_row=index)
         self.log(f"Updated task: {task.task_name} ({message})")
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(1)
         if not ok:
             self.statusBar().showMessage(f"Task needs attention: {message}")
             self._show_validation_failed(task.task_name, message)
@@ -1248,7 +1672,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def clear_builder(self) -> None:
         self.editing_index = None
         self.reset_builder_to_defaults()
-        self.tabs.setCurrentIndex(1)
+        self._set_builder_step(0)
+        self.tabs.setCurrentIndex(0)
 
     def reset_builder_to_defaults(self) -> None:
         self._loading_builder_settings = True
@@ -1271,7 +1696,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.gc_group_spin.setValue(1)
             self.air_group_spin.setValue(2)
             self.empty_group_spin.setValue(3)
-            self.core_spin.setValue(max(1, os.cpu_count() or 1))
+            self.available_cores = max(1, os.cpu_count() or 1)
+            self.core_spin.setRange(1, self.available_cores)
+            self.core_spin.setValue(self.available_cores)
+            self.core_limit_label.setText(f"available: {self.available_cores}")
+            self.core_spin.setToolTip(f"Detected CPU cores: {self.available_cores}")
             self.detector_mode_combo.setCurrentIndex(0)
             self.reduction_mode_combo.setCurrentIndex(0)
             self.pair_table.setRowCount(0)
@@ -1447,7 +1876,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             f"Eig1M files: {task.eig1m_count}",
             f"Sequence: {task.sequence_label}",
             f"PONI/mask: {task.detector_label} configured",
-            f"Thickness: capillary={task.capillary_thickness}, GC={task.gc_thickness}",
+            f"Monitor PVs: Pil300K={task.pil300k_monitor_key}, Eig1M={task.eig1m_monitor_key}",
+            f"Thickness: sample={task.capillary_thickness}, GC={task.gc_thickness}",
             f"Groups: GC={task.gc_group}, air={task.air_group}, empty={task.empty_group}",
             f"Pairs: {task.pair_label}",
         ])
@@ -1511,6 +1941,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         return candidates[-1] if candidates else None
 
     def _read_final_curve_payloads(self, handle: h5py.File, include_saxs_final: bool = False) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        if include_saxs_final:
+            curves = self._read_stitched_curve_payloads(handle)
+            return curves if curves else self._read_detector_reduction_payloads(handle)
+
         curves: list[tuple[str, np.ndarray, np.ndarray]] = []
         named = handle.get("/entry/asaxs_outputs")
         if isinstance(named, h5py.Group):
@@ -1521,9 +1955,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
             return curves
         group = handle.get("/entry/final/corrected_I_q_E")
         curves = self._rows_from_q_i_group(group, "final")
-        if curves or not include_saxs_final:
-            return curves
-        return self._read_stitched_curve_payloads(handle)
+        return curves
 
     def _read_stitched_curve_payloads(self, handle: h5py.File) -> list[tuple[str, np.ndarray, np.ndarray]]:
         root = handle.get("/entry/stitched_averages/curves")
@@ -1660,10 +2092,26 @@ class DashboardWindow(QtWidgets.QMainWindow):
         menu.addAction(self.move_up_action)
         menu.addAction(self.move_down_action)
         menu.addAction(self.open_output_action)
+        menu.addAction(self.send_to_xanos_action)
         menu.addSeparator()
         menu.addAction(self.set_status_action)
         menu.addAction(self.remove_task_action)
+        self._update_send_to_xanos_action()
         menu.exec_(self.queue_table.viewport().mapToGlobal(position))
+
+    def _update_send_to_xanos_action(self) -> None:
+        index = self.selected_index()
+        task = self.tasks[index] if index is not None else None
+        enabled = bool(task and task.status == "Done" and task.is_asaxs_mode())
+        self.send_to_xanos_action.setEnabled(enabled)
+        if task is None:
+            self.send_to_xanos_action.setToolTip("Select a completed ASAXS task first.")
+        elif task.status != "Done":
+            self.send_to_xanos_action.setToolTip("XAnoS component extraction is available after the task is Done.")
+        elif not task.is_asaxs_mode():
+            self.send_to_xanos_action.setToolTip("SAXS-only tasks do not need XAnoS component extraction.")
+        else:
+            self.send_to_xanos_action.setToolTip("Open the task's XAnoS-format .dat files in XAnoS Components.")
 
     def edit_selected_task(self) -> None:
         index = self.selected_index()
@@ -1671,7 +2119,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             return
         self.editing_index = index
         self.populate_builder_from_task(self.tasks[index])
-        self.tabs.setCurrentIndex(1)
+        self._set_builder_step(0)
+        self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(f"Editing queue task: {self.tasks[index].task_name}")
 
     def populate_builder_from_task(self, task: TaskSpec) -> None:
@@ -1692,6 +2141,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.pil_mask_edit.setText(task.pil300k_mask)
             self.eig_poni_edit.setText(task.eig1m_poni)
             self.eig_mask_edit.setText(task.eig1m_mask)
+            self._set_combo_text(self.pil_monitor_combo, task.pil300k_monitor_key or "SPDS")
+            self._set_combo_text(self.eig_monitor_combo, task.eig1m_monitor_key or "WPDS")
             self.capillary_spin.setValue(task.capillary_thickness)
             self.gc_thickness_spin.setValue(task.gc_thickness)
             self.gc_group_spin.setValue(task.gc_group or 0)
@@ -1906,6 +2357,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         for index in queue_candidates:
             self.tasks[index].status = "Queued"
             self.tasks[index].message = "Waiting to restart"
+        self.last_successful_task_index = None
         self.active_run_indices = queue_candidates
         self.overall_progress.setRange(0, 100)
         self.overall_progress.setValue(0)
@@ -1921,7 +2373,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.runner.task_skipped.connect(self._task_skipped)
         self.runner.all_done.connect(self._all_done)
         self.runner.start()
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(1)
         self._queue_command_notice(f"Started {len(queue_candidates)} queued task(s).")
 
     def stop_current_queue(self) -> None:
@@ -1977,6 +2429,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.tasks[index].status = "Done" if ok else ("Stopped" if message == "Stopped by user" else "Failed")
         self.tasks[index].message = message
         if ok:
+            self.last_successful_task_index = index
             self._set_detector_progress_complete(self.tasks[index])
             self._set_task_progress_value(1.0, "Complete")
         elif message != "Stopped by user":
@@ -2030,6 +2483,46 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.save_queue()
         self.refresh_queue(select_row=self._next_active_or_finished_row(self.selected_index() or 0))
         self.refresh_current_curves()
+        self._show_next_step_for_last_success()
+
+    def _show_next_step_for_last_success(self) -> None:
+        index = self.last_successful_task_index
+        self.last_successful_task_index = None
+        if index is None or not (0 <= index < len(self.tasks)):
+            return
+        task = self.tasks[index]
+        if task.status != "Done":
+            return
+
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Information)
+        dialog.setWindowTitle("Reduction Complete")
+        dialog.setText(f"{task.task_name} finished successfully.")
+        dialog.setInformativeText(
+            "Next recommended step:\n"
+            + (
+                "Open the I-q plot viewer to inspect/export the SAXS curves."
+                if task.is_saxs_mode()
+                else "Open XAnoS Components to extract ASAXS component curves."
+            )
+        )
+        next_button = dialog.addButton(
+            "Open I-q Plot Viewer" if task.is_saxs_mode() else "Open XAnoS Components",
+            QtWidgets.QMessageBox.AcceptRole,
+        )
+        output_button = dialog.addButton("Open Output Folder", QtWidgets.QMessageBox.ActionRole)
+        dialog.addButton("Later", QtWidgets.QMessageBox.RejectRole)
+        dialog.exec_()
+        clicked = dialog.clickedButton()
+        if clicked is next_button:
+            if task.is_saxs_mode():
+                self.open_h5_iq_viewer_for_task(task)
+            else:
+                self.open_xanos_components_for_task(task)
+        elif clicked is output_button:
+            task.output_path.mkdir(parents=True, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(task.output_path)  # type: ignore[attr-defined]
 
     def _reset_task_progress(self) -> None:
         self.overall_progress.setRange(0, 100)
@@ -2080,11 +2573,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.h5_iq_viewer = H5IqViewerDialog(self)
         index = self.selected_index()
         if index is not None:
-            self.h5_iq_viewer.open_file(self.tasks[index].output_path)
+            self.open_h5_iq_viewer_for_task(self.tasks[index])
         else:
             self.h5_iq_viewer.show()
             self.h5_iq_viewer.raise_()
             self.h5_iq_viewer.activateWindow()
+
+    def open_h5_iq_viewer_for_task(self, task: TaskSpec) -> None:
+        if self.h5_iq_viewer is None:
+            self.h5_iq_viewer = H5IqViewerDialog(self)
+        self.h5_iq_viewer.open_file(task.output_path)
 
     def open_h5_structure_viewer(self) -> None:
         if self.h5_structure_viewer is None:
@@ -2097,11 +2595,119 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.h5_structure_viewer.raise_()
             self.h5_structure_viewer.activateWindow()
 
+    def open_pyfai_setup(self) -> None:
+        try:
+            if self.pyfai_setup_window is None:
+                from aswaxs_live.preprocessing.gui import PreprocessingWindow
+
+                self.pyfai_setup_window = PreprocessingWindow()
+            self.pyfai_setup_window.show()
+            self.pyfai_setup_window.raise_()
+            self.pyfai_setup_window.activateWindow()
+        except Exception as exc:  # noqa: BLE001 - report optional tool failures in the GUI.
+            self.pyfai_setup_window = None
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Cannot Open pyFAI Setup",
+                f"The pyFAI PONI/mask setup tool could not start.\n\n{exc}",
+            )
+
+    def open_xanos_components(self) -> None:
+        index = self.selected_index()
+        task = self.tasks[index] if index is not None else None
+        if task is None:
+            self._open_xanos_components_window([])
+        else:
+            self.open_xanos_components_for_task(task)
+
+    def send_selected_task_to_xanos(self) -> None:
+        index = self.selected_index()
+        task = self.tasks[index] if index is not None else None
+        if task is None:
+            QtWidgets.QMessageBox.information(self, "No Task Selected", "Select a completed ASAXS task first.")
+            return
+        if task.status != "Done":
+            QtWidgets.QMessageBox.information(
+                self,
+                "Task Not Complete",
+                f"{task.task_name} is {task.status}. XAnoS component extraction is available after the task is Done.",
+            )
+            return
+        if not task.is_asaxs_mode():
+            QtWidgets.QMessageBox.information(
+                self,
+                "SAXS-only Task",
+                "SAXS-only tasks already finish at I(q)/XAnoS-format output and do not need XAnoS component extraction.",
+            )
+            return
+        data_files = self._xanos_dat_files_for_task(task)
+        if not data_files:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No XAnoS Data Found",
+                "No XAnoS-format .dat files were found for this task.\n\n"
+                f"Expected them under:\n{task.output_path / 'XAnos format'}",
+            )
+            return
+        self.statusBar().showMessage(f"Sending {task.task_name} to XAnoS Components ({len(data_files)} files).")
+        self._open_xanos_components_window(data_files)
+
+    def open_xanos_components_for_task(self, task: TaskSpec) -> None:
+        data_files = self._xanos_dat_files_for_task(task)
+        if not data_files:
+            self.statusBar().showMessage("Opening XAnoS Components without preloaded data; no task .dat files were found.")
+        self._open_xanos_components_window(data_files)
+
+    def _open_xanos_components_window(self, data_files: list[Path]) -> None:
+        try:
+            self.xanos_components_window = open_xanos_components_window(data_files)
+        except XAnoSBridgeError as exc:
+            QtWidgets.QMessageBox.critical(self, "Cannot Open XAnoS Components", str(exc))
+        except Exception as exc:  # noqa: BLE001 - keep dashboard alive if optional tool fails.
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Cannot Open XAnoS Components",
+                f"The XAnoS component extraction GUI could not start.\n\n{exc}",
+            )
+
+    def _xanos_dat_files_for_task(self, task: TaskSpec) -> list[Path]:
+        xanos_dir = task.output_path / "XAnos format"
+        if not xanos_dir.exists():
+            return []
+        candidate_dirs: list[Path] = []
+        if task.is_asaxs_mode() and task.asaxs_pairs:
+            for pair in task.asaxs_pairs:
+                candidate_dirs.extend([xanos_dir / safe_name(pair.output_name), xanos_dir / pair.output_name])
+        else:
+            name = task.xanos_output_name() or task.task_name
+            candidate_dirs.extend([xanos_dir / safe_name(name), xanos_dir / name])
+        seen_dirs: set[Path] = set()
+        files: list[Path] = []
+        for folder in candidate_dirs:
+            if folder in seen_dirs or not folder.exists():
+                continue
+            seen_dirs.add(folder)
+            files.extend(path for path in sorted(folder.glob("*.dat")) if path.is_file())
+        if not files:
+            files.extend(path for path in sorted(xanos_dir.rglob("*.dat")) if path.is_file())
+        return files
+
     def _selected_task_analysis_h5(self) -> Path | None:
         index = self.selected_index()
         if index is None:
             return None
         return self._find_task_analysis_h5(self.tasks[index])
+
+    def open_frame_stability_help(self) -> None:
+        if self.frame_stability_help_dialog is None:
+            self.frame_stability_help_dialog = HelpDocumentDialog(
+                "SAXS Frame Stability QC Guide",
+                FRAME_STABILITY_HELP_PATH,
+                self,
+            )
+        self.frame_stability_help_dialog.show()
+        self.frame_stability_help_dialog.raise_()
+        self.frame_stability_help_dialog.activateWindow()
 
     def about(self) -> None:
         QtWidgets.QMessageBox.information(self, "About ASWAXS v5", "ASWAXS v5 task-queue dashboard.")

@@ -17,12 +17,14 @@ from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as Navigatio
 from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from .frame_stability_gui import FrameStabilityWidget
+from .ui_theme import apply_tool_theme, fit_window_to_available_screen
 from .xanos_export import write_xanos_curve_file, xanos_curve_header_info
 
 
 H5_FILTER = "HDF5 files (*.h5 *.hdf5);;All files (*)"
 IQ_VIEWER_INITIAL_SIZE = QtCore.QSize(1240, 900)
-IQ_VIEWER_MINIMUM_SIZE = QtCore.QSize(1120, 780)
+IQ_VIEWER_MINIMUM_SIZE = QtCore.QSize(860, 620)
 IQ_VIEWER_LEFT_WIDTH = 390
 IQ_VIEWER_PLOT_WIDTH = 850
 IQ_X_LABEL = r"$q$ ($\mathrm{\AA}^{-1}$)"
@@ -83,45 +85,79 @@ class BackgroundCurve:
     sigma: np.ndarray | None
 
 
+class H5CurveLoadWorker(QtCore.QThread):
+    completed = QtCore.pyqtSignal(object, object)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, path: Path, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self.path = path
+
+    def run(self) -> None:
+        try:
+            if not self.path.exists():
+                raise FileNotFoundError(f"HDF5 file/folder does not exist: {self.path}")
+            h5_paths = _h5_paths_from_file_or_folder(self.path)
+            curves: list[H5CurveRecord] = []
+            for h5_path in h5_paths:
+                with h5py.File(h5_path, "r") as handle:
+                    source_label = _source_label(self.path, h5_path) if len(h5_paths) > 1 else ""
+                    curves.extend(discover_iq_curves(handle, source_path=h5_path, source_label=source_label))
+        except Exception as exc:  # noqa: BLE001 - pass filesystem/HDF5 failures back to the GUI.
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(curves, h5_paths)
+
+
 class H5IqViewerDialog(QtWidgets.QDialog):
     """Read-only HDF5 q-I curve viewer."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("HDF5 I-q Plot Viewer")
-        self.resize(IQ_VIEWER_INITIAL_SIZE)
-        self.setMinimumSize(IQ_VIEWER_MINIMUM_SIZE)
         self.curves: list[H5CurveRecord] = []
         self.background_curve: BackgroundCurve | None = None
         self.background_record_key: tuple[str, str, int | None] | None = None
         self._background_pick_mode = False
         self._saved_sample_selection: list[int] = []
         self._plotted_points: list[tuple[np.ndarray, np.ndarray, str]] = []
+        self._frame_stability_source_dirty = True
+        self.h5_load_worker: H5CurveLoadWorker | None = None
         self._build_ui()
+        apply_tool_theme(self)
+        fit_window_to_available_screen(self, IQ_VIEWER_INITIAL_SIZE, minimum=IQ_VIEWER_MINIMUM_SIZE)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
         path_row = QtWidgets.QHBoxLayout()
         self.path_edit = QtWidgets.QLineEdit()
         browse = QtWidgets.QPushButton("Browse")
         browse.clicked.connect(self.browse_file)
-        browse_folder = QtWidgets.QPushButton("Browse Folder")
-        browse_folder.clicked.connect(self.browse_folder)
-        load = QtWidgets.QPushButton("Load")
-        load.clicked.connect(self.load_file)
-        path_row.addWidget(QtWidgets.QLabel("HDF5 file/folder"))
+        self.load_button = QtWidgets.QPushButton("Load")
+        self.load_button.clicked.connect(self.load_file)
+        path_row.addWidget(QtWidgets.QLabel("HDF5 file"))
         path_row.addWidget(self.path_edit, 1)
         path_row.addWidget(browse)
-        path_row.addWidget(browse_folder)
-        path_row.addWidget(load)
+        path_row.addWidget(self.load_button)
         root.addLayout(path_row)
 
+        self.viewer_tabs = QtWidgets.QTabWidget()
+        curves_page = QtWidgets.QWidget()
+        curves_root = QtWidgets.QVBoxLayout(curves_page)
+        curves_root.setContentsMargins(0, 0, 0, 0)
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        root.addWidget(splitter, 1)
+        curves_root.addWidget(splitter, 1)
+        self.viewer_tabs.addTab(curves_page, "I-q Curves")
+        self.frame_stability_widget = FrameStabilityWidget(self, show_file_controls=False)
+        self.viewer_tabs.addTab(self.frame_stability_widget, "Frame Stability QC")
+        self.viewer_tabs.currentChanged.connect(self._viewer_tab_changed)
+        root.addWidget(self.viewer_tabs, 1)
 
         left = QtWidgets.QWidget()
-        left.setMinimumWidth(420)
-        left.setMaximumWidth(600)
+        left.setMinimumWidth(340)
+        left.setMaximumWidth(560)
         left_layout = QtWidgets.QVBoxLayout(left)
 
         source_row = QtWidgets.QHBoxLayout()
@@ -165,6 +201,7 @@ class H5IqViewerDialog(QtWidgets.QDialog):
 
         action_row = QtWidgets.QHBoxLayout()
         plot_button = QtWidgets.QPushButton("Plot Selected")
+        plot_button.setObjectName("PrimaryActionButton")
         plot_button.setMinimumWidth(112)
         plot_button.clicked.connect(self.plot_selected)
         export_button = QtWidgets.QPushButton("Export XAnoS .dat")
@@ -239,6 +276,7 @@ class H5IqViewerDialog(QtWidgets.QDialog):
 
         pair_row_2 = QtWidgets.QHBoxLayout()
         plot_pairs = QtWidgets.QPushButton("Plot Pair Outputs")
+        plot_pairs.setObjectName("PrimaryActionButton")
         plot_pairs.setMinimumWidth(130)
         plot_pairs.clicked.connect(self.plot_pair_outputs)
         export_pairs = QtWidgets.QPushButton("Export Pair Outputs")
@@ -250,19 +288,20 @@ class H5IqViewerDialog(QtWidgets.QDialog):
         left_layout.addLayout(pair_row_2)
 
         self.status_label = QtWidgets.QLabel("Choose an analysis HDF5 file.")
+        self.status_label.setObjectName("ToolStatus")
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.status_label.setMinimumHeight(self.status_label.sizeHint().height())
         left_layout.addWidget(self.status_label)
         splitter.addWidget(left)
 
         plot_panel = QtWidgets.QWidget()
-        plot_panel.setMinimumSize(720, 720)
+        plot_panel.setMinimumSize(500, 500)
         plot_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         self.figure = Figure(figsize=(7.2, 7.2), dpi=110)
         self.figure.subplots_adjust(left=0.13, right=0.98, bottom=0.12, top=0.97)
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMinimumSize(720, 720)
+        self.canvas.setMinimumSize(500, 500)
         self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.toolbar = NavigationToolbar(self.canvas, self)
         self.ax = self.figure.add_subplot(111)
@@ -296,33 +335,50 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             self.path_edit.setText(path)
             self.load_file()
 
-    def browse_folder(self) -> None:
-        start = Path(self.path_edit.text()) if self.path_edit.text().strip() else Path.home()
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Open result folder for I-q plotting", str(start))
-        if folder:
-            self.path_edit.setText(folder)
-            self.load_file()
-
     def load_file(self) -> None:
         path = Path(self.path_edit.text().strip())
+        if self.h5_load_worker is not None:
+            self.status_label.setText("An HDF5 file is already being read. The viewer remains responsive while it finishes.")
+            return
         self.curve_list.clear()
         self.curves = []
-        if not path.exists():
-            self.status_label.setText("HDF5 file/folder does not exist.")
-            return
-        try:
-            h5_paths = _h5_paths_from_file_or_folder(path)
-            for h5_path in h5_paths:
-                with h5py.File(h5_path, "r") as handle:
-                    source_label = _source_label(path, h5_path) if len(h5_paths) > 1 else ""
-                    self.curves.extend(discover_iq_curves(handle, source_path=h5_path, source_label=source_label))
-        except Exception as exc:  # noqa: BLE001 - show GUI-friendly error.
-            self.status_label.setText(f"Could not read HDF5: {exc}")
-            return
+        self.status_label.setText(f"Reading HDF5 metadata from {path}...")
+        self.load_button.setEnabled(False)
+        self.h5_load_worker = H5CurveLoadWorker(path, self)
+        self.h5_load_worker.completed.connect(lambda curves, paths, source=path: self._h5_load_complete(source, curves, paths))
+        self.h5_load_worker.failed.connect(self._h5_load_failed)
+        self.h5_load_worker.finished.connect(self._h5_load_finished)
+        self.h5_load_worker.start()
+
+    def _h5_load_complete(self, path: Path, curves: list[H5CurveRecord], h5_paths: list[Path]) -> None:
+        self.curves = curves
         self._refill_curve_list(select_first=True)
+        self._frame_stability_source_dirty = True
+        if self.viewer_tabs.currentIndex() == 1:
+            self._load_frame_stability_source()
         source_text = f" in {len(h5_paths)} HDF5 file(s)" if path.is_dir() else ""
         self.status_label.setText(f"Found {len(self.curves)} plottable q-data rows{source_text}.")
         self.plot_selected()
+
+    def _h5_load_failed(self, message: str) -> None:
+        self.status_label.setText(f"Could not read HDF5: {message}")
+
+    def _h5_load_finished(self) -> None:
+        if self.h5_load_worker is not None:
+            self.h5_load_worker.deleteLater()
+        self.h5_load_worker = None
+        self.load_button.setEnabled(True)
+
+    def _viewer_tab_changed(self, index: int) -> None:
+        if index == 1 and self._frame_stability_source_dirty:
+            self._load_frame_stability_source()
+
+    def _load_frame_stability_source(self) -> None:
+        path_text = self.path_edit.text().strip()
+        if not path_text:
+            return
+        self.frame_stability_widget.open_file(Path(path_text))
+        self._frame_stability_source_dirty = False
 
     def _refill_curve_list(self, select_first: bool = False) -> None:
         if not isinstance(select_first, bool):
@@ -340,8 +396,8 @@ class H5IqViewerDialog(QtWidgets.QDialog):
             self._style_curve_list_item(item, curve)
             self.curve_list.addItem(item)
         if select_first:
-            for row in range(min(self.curve_list.count(), self.max_curves_spin.value())):
-                self.curve_list.item(row).setSelected(True)
+            if self.curve_list.count():
+                self.curve_list.item(0).setSelected(True)
 
     def select_background(self) -> None:
         self._saved_sample_selection = self._selected_curve_indices()
@@ -765,11 +821,14 @@ class H5StructureViewerDialog(QtWidgets.QDialog):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("HDF5 Structure / Metadata Viewer")
-        self.resize(1180, 760)
         self._build_ui()
+        apply_tool_theme(self)
+        fit_window_to_available_screen(self, (1180, 760), minimum=(760, 520))
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
         path_row = QtWidgets.QHBoxLayout()
         self.path_edit = QtWidgets.QLineEdit()
         browse = QtWidgets.QPushButton("Browse")
@@ -812,6 +871,7 @@ class H5StructureViewerDialog(QtWidgets.QDialog):
         splitter.setStretchFactor(1, 2)
 
         self.status_label = QtWidgets.QLabel("Choose an HDF5 file.")
+        self.status_label.setObjectName("ToolStatus")
         root.addWidget(self.status_label)
 
     def open_file(self, path: Path | str) -> None:
@@ -927,15 +987,22 @@ def discover_iq_curves(handle: h5py.File, source_path: Path | None = None, sourc
 
 
 def read_curve_row(handle: h5py.File, record: H5CurveRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    q = np.asarray(handle[record.q_path][()], dtype=float)
-    intensity = np.asarray(handle[record.i_path][()], dtype=float)
-    sigma = np.asarray(handle[record.sigma_path][()], dtype=float) if record.sigma_path else None
-    if record.row is not None:
-        intensity = intensity[record.row]
-        if sigma is not None and sigma.ndim == 2:
-            sigma = sigma[record.row]
-        if q.ndim == 2:
-            q = q[record.row if record.row < q.shape[0] else 0]
+    q_dataset = handle[record.q_path]
+    intensity_dataset = handle[record.i_path]
+    sigma_dataset = handle[record.sigma_path] if record.sigma_path else None
+    if record.row is None:
+        q = np.asarray(q_dataset[()], dtype=float)
+        intensity = np.asarray(intensity_dataset[()], dtype=float)
+        sigma = np.asarray(sigma_dataset[()], dtype=float) if sigma_dataset is not None else None
+        return q, intensity, sigma
+    row = int(record.row)
+    intensity = np.asarray(intensity_dataset[row] if intensity_dataset.ndim > 1 else intensity_dataset[()], dtype=float)
+    if sigma_dataset is None:
+        sigma = None
+    else:
+        sigma = np.asarray(sigma_dataset[row] if sigma_dataset.ndim > 1 else sigma_dataset[()], dtype=float)
+    q_row = row if q_dataset.ndim > 1 and row < q_dataset.shape[0] else 0
+    q = np.asarray(q_dataset[q_row] if q_dataset.ndim > 1 else q_dataset[()], dtype=float)
     return q, intensity, sigma
 
 
