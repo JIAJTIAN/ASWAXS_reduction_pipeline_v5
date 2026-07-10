@@ -1861,10 +1861,19 @@ class DashboardWindow(QtWidgets.QMainWindow):
             item.setFont(font)
 
     def _task_tooltip(self, task: TaskSpec) -> str:
-        return "\n".join([
+        lines = [
             f"Task: {task.task_name}",
             f"Status: {task.status}",
-            f"Message: {task.message or '-'}",
+        ]
+        attention_lines = self._task_attention_lines(task)
+        if attention_lines:
+            lines.append("Needs attention:")
+            lines.extend(f"- {line}" for line in attention_lines)
+        else:
+            lines.append(f"Message: {task.message or '-'}")
+        lines.extend([
+            "",
+            "Task information:",
             f"Detector mode: {task.detector_label}",
             f"Reduction mode: {'ASAXS / XAnos' if task.is_asaxs_mode() else 'SAXS only'}",
             f"Source: {task.source_label}",
@@ -1881,6 +1890,13 @@ class DashboardWindow(QtWidgets.QMainWindow):
             f"Groups: GC={task.gc_group}, air={task.air_group}, empty={task.empty_group}",
             f"Pairs: {task.pair_label}",
         ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _task_attention_lines(task: TaskSpec) -> list[str]:
+        if task.status != "Needs Attention":
+            return []
+        return [part.strip() for part in str(task.message or "").split(";") if part.strip()]
 
     def refresh_current_curves(self) -> None:
         if not hasattr(self, "current_curve_plot"):
@@ -2339,6 +2355,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
             if ok:
                 queue_candidates.append(index)
             elif run_any_status:
+                self.tasks[index].status = "Needs Attention"
+                self.tasks[index].message = message
+                self.refresh_queue(select_row=index)
                 self._show_validation_failed("Cannot start invalid task", f"{self.tasks[index].task_name}: {message}")
                 self._queue_command_notice("Task validation failed. Fix the task settings before running.")
                 return

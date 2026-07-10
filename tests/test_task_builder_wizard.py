@@ -6,6 +6,7 @@ import h5py
 from PyQt5 import QtWidgets
 
 from aswaxs_live import dashboard
+from aswaxs_live.task_queue import TaskSpec
 
 
 def test_task_builder_uses_guided_pages(tmp_path, monkeypatch) -> None:
@@ -89,6 +90,36 @@ def test_task_builder_step_buttons_jump_directly(tmp_path, monkeypatch) -> None:
     window.builder_step_buttons[1].click()
     app.processEvents()
     assert window.builder_stack.currentIndex() == 1
+    window.close()
+
+
+def test_needs_attention_tooltip_shows_validation_reasons(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "BUILDER_SETTINGS_PATH", tmp_path / "builder.json")
+    monkeypatch.setattr(dashboard, "DEFAULT_QUEUE_PATH", tmp_path / "queue.json")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = dashboard.DashboardWindow()
+    task = TaskSpec(
+        task_name="bad_task",
+        raw_folder=str(tmp_path / "raw"),
+        output_dir=str(tmp_path / "out"),
+        num_energies=1,
+        num_groups=1,
+        num_frames=1,
+        pil300k_poni="",
+        pil300k_mask="",
+        eig1m_poni="",
+        eig1m_mask="",
+        status="Needs Attention",
+        message="Pil300K: no files; Pil300K PONI missing; Pil300K mask missing",
+    )
+
+    tooltip = window._task_tooltip(task)
+
+    assert "Status: Needs Attention" in tooltip
+    assert "Needs attention:" in tooltip
+    assert "- Pil300K: no files" in tooltip
+    assert "- Pil300K PONI missing" in tooltip
+    assert "Task information:" in tooltip
     window.close()
 
 
