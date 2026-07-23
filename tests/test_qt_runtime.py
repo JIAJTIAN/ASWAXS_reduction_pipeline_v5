@@ -1,4 +1,4 @@
-from aswaxs_live.qt_runtime import suppress_glx_warning
+from aswaxs_live.app.qt_runtime import suppress_glx_warning
 
 
 def test_suppress_glx_warning_preserves_existing_rules() -> None:

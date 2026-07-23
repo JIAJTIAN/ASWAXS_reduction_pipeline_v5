@@ -11,7 +11,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from aswaxs_live.preprocessing.gui import run_app  # noqa: E402
+from aswaxs_live.tools.pyfai_setup import run_app  # noqa: E402
 
 
 def main() -> int:

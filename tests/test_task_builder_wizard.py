@@ -3,10 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import h5py
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
-from aswaxs_live import dashboard
-from aswaxs_live.task_queue import TaskSpec
+from aswaxs_live.app import dashboard
+from aswaxs_live.workflows.queue import TaskSpec
 
 
 def test_task_builder_uses_guided_pages(tmp_path, monkeypatch) -> None:
@@ -123,7 +123,7 @@ def test_needs_attention_tooltip_shows_validation_reasons(tmp_path, monkeypatch)
     window.close()
 
 
-def test_calibration_step_auto_scans_monitor_pvs(tmp_path, monkeypatch) -> None:
+def test_sequence_step_auto_scans_monitor_pvs(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(dashboard, "BUILDER_SETTINGS_PATH", tmp_path / "builder.json")
     monkeypatch.setattr(dashboard, "DEFAULT_QUEUE_PATH", tmp_path / "queue.json")
     raw = tmp_path / "sample"
@@ -139,11 +139,83 @@ def test_calibration_step_auto_scans_monitor_pvs(tmp_path, monkeypatch) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = dashboard.DashboardWindow()
     window.raw_folder_edit.setText(str(raw))
-    for _step in range(3):
+    for _step in range(2):
         window.builder_next_button.click()
         app.processEvents()
 
-    assert window.builder_stack.currentIndex() == 3
+    assert window.builder_stack.currentIndex() == 2
     assert window.pil_monitor_combo.findText("OLD_SPDS") >= 0
     assert window.eig_monitor_combo.findText("OLD_WPDS") >= 0
+    sequence_page = window.builder_stack.widget(2)
+    calibration_page = window.builder_stack.widget(3)
+    assert window.scan_monitor_button in sequence_page.findChildren(QtWidgets.QPushButton)
+    assert window.scan_monitor_button not in calibration_page.findChildren(QtWidgets.QPushButton)
+    window.close()
+
+
+def test_raw_file_lists_show_names_but_retain_complete_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "BUILDER_SETTINGS_PATH", tmp_path / "builder.json")
+    monkeypatch.setattr(dashboard, "DEFAULT_QUEUE_PATH", tmp_path / "queue.json")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = dashboard.DashboardWindow()
+    paths = [str(tmp_path / "sample" / "Pil300K" / f"frame_{index:05d}.h5") for index in range(1000)]
+
+    window._set_files_edit(window.pil_files_edit, paths)
+    app.processEvents()
+
+    assert window.pil_files_edit.model().rowCount() == 1000
+    first = window.pil_files_edit.model().index(0, 0)
+    assert first.data() == "frame_00000.h5"
+    assert first.data(QtCore.Qt.ToolTipRole) == paths[0]
+    assert window._files_from_edit(window.pil_files_edit) == paths
+    window.close()
+
+
+def test_compact_dashboard_drawers_and_single_detector_panels(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "BUILDER_SETTINGS_PATH", tmp_path / "builder.json")
+    monkeypatch.setattr(dashboard, "DEFAULT_QUEUE_PATH", tmp_path / "queue.json")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = dashboard.DashboardWindow()
+    window.show()
+    window.tabs.setCurrentIndex(1)
+    app.processEvents()
+
+    assert not window.lower_tabs.isVisible()
+    window.log_drawer_button.setChecked(True)
+    app.processEvents()
+    assert window.lower_tabs.isVisible()
+    assert window.lower_tabs.currentWidget() is window.log_panel
+    window.log_drawer_button.setChecked(False)
+    assert not window.lower_tabs.isVisible()
+
+    window.tabs.setCurrentIndex(0)
+    window._set_builder_step(0)
+    window._set_detector_mode("pil300k")
+    app.processEvents()
+    assert not window.pil_raw_group.isHidden()
+    assert window.eig_raw_group.isHidden()
+    assert not window.pil_calibration_group.isHidden()
+    assert window.eig_calibration_group.isHidden()
+    window.close()
+
+
+def test_sequence_summary_and_navigation_follow_selected_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard, "BUILDER_SETTINGS_PATH", tmp_path / "builder.json")
+    monkeypatch.setattr(dashboard, "DEFAULT_QUEUE_PATH", tmp_path / "queue.json")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = dashboard.DashboardWindow()
+    window.energy_spin.setValue(20)
+    window.group_spin.setValue(6)
+    window.frame_spin.setValue(100)
+    window._set_detector_mode("both")
+    window._set_builder_step(2)
+    app.processEvents()
+
+    assert "12,000 frame file(s) per detector" in window.sequence_summary_label.text()
+    assert "24,000 total" in window.sequence_summary_label.text()
+    assert window.builder_back_button.text() == "Back: Task Type"
+    assert window.builder_next_button.text() == "Next: Calibration"
+
+    window._set_detector_mode("pil300k")
+    assert "12,000 total" in window.sequence_summary_label.text()
     window.close()

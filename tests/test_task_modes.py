@@ -1,4 +1,12 @@
-from aswaxs_live.task_queue import TaskSpec, _detector_batch_command, task_from_json
+import h5py
+
+from aswaxs_live.workflows.queue import (
+    TaskSpec,
+    _detector_batch_command,
+    record_task_run_timing,
+    task_from_json,
+    task_to_json,
+)
 
 
 def _task(reduction_mode: str) -> TaskSpec:
@@ -61,3 +69,30 @@ def test_detector_batch_command_uses_detector_specific_monitor_key(tmp_path) -> 
 
     assert pil_cmd[pil_cmd.index("--monitor-key") + 1] == "OLD_SPDS"
     assert eig_cmd[eig_cmd.index("--monitor-key") + 1] == "OLD_WPDS"
+
+
+def test_last_run_timing_round_trips_through_queue_json() -> None:
+    task = _task("asaxs")
+    task.last_run_seconds = 65.4
+    task.last_run_finished_at = "2026-07-20T12:00:00+00:00"
+
+    restored = task_from_json(task_to_json(task))
+
+    assert restored.last_run_seconds == 65.4
+    assert restored.last_run_label == "1m 5s"
+    assert restored.last_run_finished_at == "2026-07-20T12:00:00+00:00"
+
+
+def test_full_task_timing_is_stored_in_combined_analysis_h5(tmp_path) -> None:
+    task = _task("asaxs")
+    task.output_dir = str(tmp_path)
+    with h5py.File(task.combined_h5_path(), "w") as handle:
+        handle.create_group("entry")
+
+    record_task_run_timing(task, 123.5, "2026-07-20T12:00:00+00:00")
+
+    with h5py.File(task.combined_h5_path(), "r") as handle:
+        timing = handle["/entry/reduction_timing"]
+        assert timing.attrs["last_run_seconds"] == 123.5
+        assert timing.attrs["last_run_finished_at"] == "2026-07-20T12:00:00+00:00"
+        assert "stitching" in timing.attrs["scope"]

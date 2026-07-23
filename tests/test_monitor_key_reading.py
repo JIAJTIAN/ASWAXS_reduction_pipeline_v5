@@ -1,6 +1,6 @@
 import h5py
 
-from aswaxs_live.core.reduce_aswaxs_sequence import read_ndattr_scalar_from_handle
+from aswaxs_live.reduction.aswaxs_sequence import read_ndattr_scalar_from_handle
 
 
 def test_read_monitor_key_by_ndattribute_name(tmp_path) -> None:

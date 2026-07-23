@@ -3,9 +3,11 @@
 ## Purpose
 
 The Frame Stability QC tab evaluates whether repeated SAXS detector frames are
-stable before they are interpreted as one measurement. It is a post-averaging,
-advisory analysis. It does not modify raw HDF5 files, replace the stored group
-average, or regenerate ASAXS, stitching, or XAnoS outputs.
+stable before they are interpreted as one measurement. For new reductions, QC
+runs from the frame-resolved 1-D curves already in memory immediately before
+the group average. The recommendation is advisory: it does not modify raw HDF5
+files, replace the stored group average, or regenerate ASAXS, stitching, or
+XAnoS outputs.
 
 The analysis is intended to help answer three questions:
 
@@ -20,7 +22,9 @@ The analysis is intended to help answer three questions:
    output folder.
 3. Select the `Frame Stability QC` tab.
 4. Choose a detector, energy, and group series.
-5. Click `Reduce Frames and Run QC`.
+5. A saved report opens immediately when averaging-time QC is present. For an
+   older analysis file, click `Reduce Frames and Run QC` to use the legacy
+   read-only fallback.
 
 Pil300K is normally the primary detector for SAXS stability, low-q behavior,
 Rg, and I(0). Eig1M can also be examined, but Guinier quantities are generally
@@ -28,7 +32,12 @@ not meaningful over a WAXS-only q range.
 
 ## Required Analysis History
 
-The selected analysis HDF5 must retain enough provenance to locate:
+Current analysis files store a completed QC report under the detector reduction
+process. This report includes the frame-resolved plot arrays, calculated
+metrics, labels, recommendation, q ranges, and a `qc_complete` marker.
+
+For older files without a saved report, the selected analysis HDF5 must retain
+enough provenance to locate:
 
 - the reduction manifest or complete raw-file list;
 - energy, group, and frame numbering;
@@ -39,15 +48,20 @@ The selected analysis HDF5 must retain enough provenance to locate:
 
 Task-level combined files are supported. The viewer follows recorded detector
 analysis references and also checks sibling `Pil300K` and `Eig1M` output
-directories. The original raw files, PONI, mask, and manifest must still be
-accessible under their recorded paths.
+directories. Raw files and calibration paths are required only for the legacy
+fallback.
 
 ## What Happens When QC Runs
 
-History discovery reads metadata only. It does not read detector images.
+During a new reduction, each raw detector image is integrated once. Frame QC is
+calculated from those normalized 1-D curves before `average_groups` releases
+them, and the report is stored beside the averaged data in `analysis.h5`.
 
-After `Reduce Frames and Run QC` is clicked, the selected energy/group series is
-processed in a background thread:
+When the viewer finds the saved `qc_complete` marker, it loads and plots that
+report directly. It does not reopen raw HDF5 files or repeat pyFAI integration.
+
+For a legacy file without saved QC, `Reduce Frames and Run QC` processes the
+selected energy/group series in a background thread:
 
 1. Each recorded raw HDF5 frame is opened read-only.
 2. Energy, detector image, and monitor value are read.
@@ -298,13 +312,13 @@ sample damage.
 
 ## Using QC in Reduction Decisions
 
-The current tool is deliberately review-only. A conservative workflow is:
+The QC recommendation is deliberately advisory. A conservative workflow is:
 
-1. perform the normal reduction;
-2. inspect sample, solvent, and relevant background frame series;
+1. perform the normal reduction, which now calculates QC before each average;
+2. inspect the stored sample, solvent, and relevant background reports;
 3. record the recommended stable prefix and any manual scientific decision;
 4. compare synchronized detector behavior;
-5. only then decide whether a QC-selected re-average is warranted.
+5. only then decide whether a future QC-selected re-average is warranted.
 
 For simultaneous Pil300K and Eig1M measurements, a common temporal cutoff may
 be appropriate when both detectors observe the same exposure sequence. The most
@@ -315,9 +329,12 @@ sensitive detector often determines the conservative cutoff.
 Analysis-HDF5 curve discovery runs in a worker thread. HDF5 rows are sliced
 directly, and only one curve is plotted initially.
 
-Frame QC is more expensive because it intentionally reopens and reintegrates
-every selected raw frame. For `N` frames, it performs approximately `N` raw HDF5
-reads and `N` pyFAI integrations. This work also runs in a background thread.
+For current files, opening Frame QC reads the saved report and does not repeat
+reduction. QC calculation adds metric processing during averaging, but no extra
+raw HDF5 reads or pyFAI integrations.
+
+Legacy files still require approximately `N` raw HDF5 reads and `N` pyFAI
+integrations for `N` selected frames. This fallback runs in a background thread.
 
 The plot itself is usually not the bottleneck. Network HDF5 access, image
 decompression, and pyFAI integration dominate the first run.
@@ -337,27 +354,57 @@ decompression, and pyFAI integration dominate the first run.
 The recorded history contains one raw image for that energy/group. A stability
 trend requires multiple independently measured frames.
 
-### Missing Raw, PONI, or Mask File
+### Missing Raw, PONI, or Mask File in a Legacy Analysis
 
-The analysis stores paths, not copies of raw detector images or calibration
-files. Run QC in an environment where those recorded paths resolve, or choose
-an analysis generated with the current filesystem mapping.
+Older analyses store paths, not copies of raw detector images or calibration
+files. Run legacy QC where those paths resolve. New analyses with stored QC do
+not require these files merely to display the saved report.
 
 ### Viewer Appears Slow
 
-Wait for the status message to update. HDF5 discovery and frame integration run
-in worker threads, so the window should remain responsive. Reopening the viewer
-clears the in-memory frame cache and requires reintegration.
+Check the status line. `Stored averaging-time QC loaded` means no reduction is
+running. A legacy report may still be slow because HDF5 discovery and frame
+integration run in a worker thread. Reopening a legacy file clears its in-memory
+cache and requires reintegration.
 
 ## References
 
-- Grant TD et al. The accurate assessment of small-angle X-ray scattering data.
-  Acta Crystallographica D 71, 45-56 (2015).
-  https://doi.org/10.1107/S1399004714010876
-- Franke D, Jeffries CM, Svergun DI. Correlation Map, a goodness-of-fit test for
-  one-dimensional X-ray scattering spectra. Nature Methods 12, 419-422 (2015).
-  https://doi.org/10.1038/nmeth.3358
-- Brooks-Bartlett JC et al. Development of tools to automate quantitative
-  analysis of radiation damage in SAXS experiments. Journal of Synchrotron
-  Radiation 24, 63-72 (2017).
-  https://doi.org/10.1107/S1600577516015083
+The QC combines complementary methods rather than reproducing one paper's
+workflow exactly:
+
+- Frame-dependent quality metrics, Guinier quantities, and invariant-related
+  measurements follow the objective SAXS-quality approach of Grant et al.
+- CorMap-style sign-run testing follows Franke, Jeffries, and Svergun.
+- The use of several metrics together, including integrated intensity, `Rg`,
+  and `I(0)`, follows the recommendation of Hopkins and Thorne that no single
+  metric detects every form of radiation damage.
+- The default CorMap significance level of `p = 0.01` and the use of three
+  consecutive failures to identify a persistent onset follow Brooks-Bartlett
+  et al.
+
+The `q*` and FWHM trends are FrameByFrame-ASWAXS extensions for materials
+scattering. The 2-5% drift bands and reduced chi-square limits are configurable
+software defaults, not universal limits prescribed by the cited papers. The
+displayed invariant-like quantity is evaluated only over the selected measured
+q range and is not a full Porod invariant from zero to infinite q.
+
+1. Grant, T. D., Luft, J. R., Carter, L. G., Matsui, T., Weiss, T. M., Martel,
+   A. & Snell, E. H. "The accurate assessment of small-angle X-ray scattering
+   data." *Acta Crystallographica Section D* **71**, 45-56 (2015).
+   [doi:10.1107/S1399004714010876](https://doi.org/10.1107/S1399004714010876)
+
+2. Franke, D., Jeffries, C. M. & Svergun, D. I. "Correlation Map, a
+   goodness-of-fit test for one-dimensional X-ray scattering spectra."
+   *Nature Methods* **12**, 419-422 (2015).
+   [doi:10.1038/nmeth.3358](https://doi.org/10.1038/nmeth.3358)
+
+3. Hopkins, J. B. & Thorne, R. E. "Quantifying radiation damage in
+   biomolecular small-angle X-ray scattering." *Journal of Applied
+   Crystallography* **49**, 880-890 (2016).
+   [doi:10.1107/S1600576716005136](https://doi.org/10.1107/S1600576716005136)
+
+4. Brooks-Bartlett, J. C., Batters, R. A., Bury, C. S., Lowe, E. D., Ginn,
+   H. M., Round, A. & Garman, E. F. "Development of tools to automate
+   quantitative analysis of radiation damage in SAXS experiments."
+   *Journal of Synchrotron Radiation* **24**, 63-72 (2017).
+   [doi:10.1107/S1600577516015083](https://doi.org/10.1107/S1600577516015083)

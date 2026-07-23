@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from pyFAI.io.integration_config import WorkerConfig
 
-from aswaxs_live.preprocessing.processing import _pyfai_qt_env, export_image_as_edf, write_pyfai_integrate_config
+from aswaxs_live.tools.pyfai_setup.processing import _pyfai_qt_env, export_image_as_edf, write_pyfai_integrate_config
 
 
 def test_pyfai_integrate_config_prefills_geometry_from_h5_metadata(tmp_path: Path):

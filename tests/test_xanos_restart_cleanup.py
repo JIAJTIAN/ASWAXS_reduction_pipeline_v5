@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from aswaxs_live.task_queue import (
+from aswaxs_live.workflows.queue import (
     AsaxsPair,
     TaskSpec,
     _check_dat_files_writable,
@@ -75,7 +75,7 @@ def test_xanos_permission_check_reports_non_writable_dat(tmp_path: Path, monkeyp
     folder.mkdir(parents=True)
     dat_file = folder / "energy_001_sample_A_final.dat"
     dat_file.write_text("old generated dat", encoding="utf-8")
-    monkeypatch.setattr("aswaxs_live.task_queue.os.access", lambda path, mode: False)
+    monkeypatch.setattr("aswaxs_live.workflows.queue.os.access", lambda path, mode: False)
 
     with pytest.raises(PermissionError, match="Cannot overwrite existing XAnos .dat"):
         _check_dat_files_writable(folder)

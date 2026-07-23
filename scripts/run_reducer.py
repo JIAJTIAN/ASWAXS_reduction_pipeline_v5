@@ -11,9 +11,8 @@ SRC_DIR = PROJECT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from aswaxs_live.reducer import main  # noqa: E402
+from aswaxs_live.reduction.live import main  # noqa: E402
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

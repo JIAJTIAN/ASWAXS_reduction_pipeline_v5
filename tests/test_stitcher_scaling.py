@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from aswaxs_live.stitcher import ReductionRows, paired_detector_analysis_h5s, scale_high_q_to_low_q, stitch_one_row
+from aswaxs_live.reduction.stitching import ReductionRows, paired_detector_analysis_h5s, scale_high_q_to_low_q, stitch_one_row
 
 
 def _power_curve(q, amplitude=1.0, exponent=-2.0, sigma_fraction=0.05):

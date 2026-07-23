@@ -12,7 +12,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-from aswaxs_live.app import main  # noqa: E402
+from aswaxs_live.app.launcher import main  # noqa: E402
 
 
 if __name__ == "__main__":

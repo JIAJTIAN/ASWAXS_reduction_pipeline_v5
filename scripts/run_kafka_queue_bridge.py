@@ -1,4 +1,4 @@
-﻿"""Bridge Bluesky/Kafka measurement_done messages into the v5 reducer queue."""
+"""Bridge Bluesky/Kafka measurement_done messages into the v5 reducer queue."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from aswaxs_live.kafka_bridge import replay_jsonl_messages, run_bluesky_kafka_bridge  # noqa: E402
+from aswaxs_live.workflows.kafka_bridge import replay_jsonl_messages, run_bluesky_kafka_bridge  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

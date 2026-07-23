@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from aswaxs_live.xanos_export import export_analysis_h5_to_xanos_format
+from aswaxs_live.reduction.xanos_export import export_analysis_h5_to_xanos_format
 
 
 def test_saxs_xanos_export_uses_requested_output_name(tmp_path: Path):

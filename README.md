@@ -1,8 +1,8 @@
-﻿# FrameByFrame-ASWAXS
+# FrameByFrame-ASWAXS
 
 > in your own analysis
 
-FrameByFrame-ASWAXS is a GUI-first post-processing platform for turning raw
+FrameByFrame-ASWAXS is a GUI-first processing platform for turning raw
 SAXS/WAXS/ASAXS HDF5 detector frames into analysis-ready I(q) curves,
 provenance-rich analysis HDF5 files, XAnoS-compatible text exports, and
 quality-control plots.
@@ -22,8 +22,9 @@ The platform is designed around the full post-acquisition workflow:
 3. Confirm the sequence: energies, groups, and frames.
 4. Select PONI, mask, monitor/PV normalization, and thickness metadata.
 5. Define SAXS output names or ASAXS sample/solvent pairs.
-6. Run one task or a queue of tasks with frame-level progress feedback.
-7. Review final curves and quality-control diagnostics in the GUI.
+6. Run one task or a queue with group-based multicore reduction, smoothed ETA,
+   and detector-level frame progress.
+7. Review final curves and the QC reports saved during averaging.
 8. Export XAnoS-compatible `.dat` files or open downstream XAnoS tools.
 
 This makes FrameByFrame-ASWAXS useful both for beamtime batch reduction and for
@@ -37,10 +38,11 @@ post-processing already-collected datasets.
 - **GUI-first workflow.** The main path is the guided Qt dashboard, task
   builder, queue, plotter, and tools menu. Command-line scripts remain available
   for testing and compatibility.
-- **Energy-aware ASAXS.** Each energy row may have its own q grid; viewer,
+- **Energy-aware ASAXS.** Each energy row have its own q grid; viewer,
   stitching, and export code use the matching q row.
 - **Traceable derived outputs.** The analysis HDF5 stores reduced curves,
-  metadata, detector provenance, source-file history, and processing records.
+  propagated uncertainty, detector geometry, source-file history, averaging-time
+  QC reports, and full-task timing records.
 - **Fresh reduction by default.** Restart behavior is task-scoped and avoids
   deleting sibling task results in shared output folders.
 - **Downstream compatibility.** XAnoS-format `.dat` files are written for ASAXS
@@ -53,28 +55,42 @@ post-processing already-collected datasets.
 - Queue table for adding, editing, deleting, reordering, and running tasks.
 - Single-detector and dual-detector support for Pil300K and Eig1M.
 - SAXS-only and ASAXS reduction modes.
-- Parallel frame integration with per-task progress and ETA.
+- Dynamic multicore reduction by `(energy, group)`, with PONI and mask loaded
+  once per worker.
+- Per-task detector progress, smoothed frame-rate ETA, and recorded total run
+  time.
 - Detector stitching for SAXS/WAXS data, including q-gap scaling without adding
   artificial points.
 - HDF5 I(q) viewer for SAXS, WAXS, combined, final, and unstitched curves.
 - Publication-style Matplotlib plotting with interactive zoom and coordinates.
 - Viewer-side background subtraction and sample/background pair outputs.
-- Frame-stability QC for post-averaging data-quality inspection.
+- Frame-stability QC calculated from already-reduced frames before each group
+  average and saved in the analysis HDF5.
 - HDF5 structure/metadata viewer.
 - pyFAI setup GUI launcher for PONI/mask work.
 - XAnoS Components integration for completed ASAXS tasks.
+- External-tool linkers for XAnoS, XModFit, and sample-position planning without
+  permanently modifying those upstream tools.
 
 ## Project Layout
 
 ```text
 ASWAXS_reduction_pipeline_v5/
-  run_gui.py             root launcher; run without entering scripts/
-  pyproject.toml         installable application definition
-  docs/                  project notes
-  scripts/               compatibility and utility launchers
-  src/aswaxs_live/       reducer, GUI, viewer, and copied reduction core
-  outputs/               ignored local analysis output
+  run_gui.py                  root launcher; run without entering scripts/
+  pyproject.toml              installable application definition
+  docs/                       user and architecture documentation
+  scripts/                    compatibility and utility launchers
+  src/aswaxs_live/
+    app/                      dashboard, launcher, theme, and Qt support
+    reduction/                integration, QC, stitching, and analysis output
+    workflows/                task queue and beamline message orchestration
+    tools/                    independent GUIs and external-app linkers
+  outputs/                    ignored local analysis output
 ```
+
+The package ownership rules and single-owner policy are described in the
+[architecture guide](docs/architecture.md). Each feature has one authoritative
+module path; launchers and subprocesses connect to those packages directly.
 
 ## Start the Application
 
@@ -115,13 +131,44 @@ The main dashboard `Tools` menu opens the HDF5 I-q viewer, HDF5 structure and
 metadata viewer, and the pyFAI PONI/mask setup GUI. These tools no longer require
 opening their individual scripts.
 
+User-facing tools are organized under `src/aswaxs_live/tools`, with one
+subfolder per application. The Tools menu also opens the integrated **Online
+1-D Reducer**, which receives the beamline `SUB`/JSON/`image_path` contract,
+uses the FrameByFrame live reducer for read-only azimuthal integration, and
+updates detector and optionally stitched SAXS/WAXS analysis HDF5 outputs. It
+does not perform ASAXS correction or component extraction. It can also be launched
+standalone with:
+
+```bash
+framebyframe-online
+```
+
+or from a source checkout:
+
+```bash
+python scripts/run_online_reducer.py
+```
+
 ### SAXS Frame Stability QC
 
-The analysis HDF5 already preserves the raw-file history, sequence manifest,
-PONI, mask, detector path, monitor normalization, and q-integration settings.
-The HDF5 I-q viewer now has a separate `Frame Stability QC` tab. After averaging,
-select one energy/group series and the viewer re-integrates only those recorded
-raw frames in read-only mode, then presents:
+Each raw detector image is integrated only once during a current batch
+reduction. When an `(energy, group)` contains more than one frame, stability QC
+runs from the normalized frame-resolved `I(q)` and propagated `sigma(q)` already
+in memory immediately before averaging. The report is stored under the detector
+reduction process at:
+
+```text
+/entry/process_01_reduction/frame_stability_qc
+```
+
+Groups containing one frame are marked `not_applicable_single_frame`; the
+software does not run meaningless frame-stability statistics for them.
+
+The HDF5 I-q viewer has a separate `Frame Stability QC` tab. When the stored
+`qc_complete` marker is present, selecting a detector/energy/group loads the
+saved report directly without reopening raw HDF5 files or repeating pyFAI
+integration. Previous/next arrows and `Alt+Left`/`Alt+Right` browse continuously
+through the available QC series. Reports include:
 
 - frame overlays and an I_i(q)/I_1(q) heatmap;
 - invariant-like and low-q intensity ratios;
@@ -130,8 +177,14 @@ raw frames in read-only mode, then presents:
 - Good, Acceptable, and Bad labels plus a conservative initial stable-frame
   averaging recommendation.
 
-The QC is post-averaging and advisory. It does not modify raw HDF5, replace the
-stored group average, or alter downstream ASAXS results.
+The QC recommendation is advisory. It does not modify raw HDF5, replace the
+stored group average, or alter downstream ASAXS results. For an older analysis
+HDF5 without saved QC, the viewer retains a read-only legacy fallback that
+re-integrates the selected provenance frames.
+
+The scientific basis, metric interpretation, limitations, and complete paper
+citations are included in the [Frame Stability QC guide](docs/frame_stability_qc.md),
+which is also available from the GUI `Help` menu.
 
 ## Create PONI and Mask Files
 
@@ -176,6 +229,11 @@ The output directory contains:
 - `live_events.jsonl`: ordered stage-trigger log.
 - `<sample_name>_analysis.h5`: analysis/provenance HDF5 written by the current pipeline helpers.
 - `group_summary.csv`: group-average summary table.
+
+Current batch analysis HDF5 files also contain averaging-time frame-stability
+QC. A GUI-run task records its latest complete wall time under
+`/entry/reduction_timing`, including preparation, detector reduction, QC,
+averaging, finalization, stitching, and export.
 
 The V5 default is HDF5-only for reduced curves. Legacy `.dat` curve files are
 written only when `--write-text-output` is enabled.
@@ -435,6 +493,40 @@ python run_gui.py
 The GUI remembers task-builder values in `aswaxs_v5_builder_settings.json` at
 the project root. That local settings file should remain outside published
 application changes.
+
+### Multicore Reduction
+
+For dual-detector tasks, the requested CPU budget is divided between Pil300K
+and Eig1M detector subprocesses. Inside each detector, the process pool schedules
+one independent job per `(energy, group)`. For example, 20 energies and 6 groups
+provide 120 schedulable jobs per detector instead of limiting parallelism to 20
+energy batches. Workers keep their PONI and mask loaded while taking additional
+group jobs.
+
+Each worker reduces one complete group, runs applicable QC, calculates the
+average, and then releases those frame curves. Large QC plot arrays are written
+to worker-local temporary HDF5 shards instead of being transferred through the
+multiprocessing result pipe. The detector parent merges the shards into the
+analysis HDF5 and removes the temporary files.
+
+Raw HDF5 files remain read-only. After manifest validation, the frame loop opens
+each source HDF5 once to read its image, energy, and monitor value together; it
+does not perform separate per-frame existence and file-size queries.
+
+### Progress And Timing
+
+The dashboard progress bar represents the current task, not the whole queue.
+Pil300K and Eig1M frame totals are shown separately. Aggregate throughput and ETA
+use a rolling 30-second rate with exponential smoothing, which reduces jumps
+when group workers start or network HDF5 throughput changes.
+
+At completion, the queue records the full task wall time in its JSON state and
+shows it in the task tooltip and completion message. The same successful-run
+duration and UTC completion timestamp are written to:
+
+```text
+/entry/reduction_timing
+```
 
 Resume mode validates the existing analysis HDF5 before reusing it. If HDF5
 metadata is damaged, for example after a crashed writer or interrupted copy, the

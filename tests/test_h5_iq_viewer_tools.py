@@ -3,7 +3,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from aswaxs_live.h5_tools import H5CurveRecord, _curve_matches_source, _fixed_background_sample_indices, _safe_filename, _subtract_background_curve, _write_curve_export, _xanos_dat_path, discover_iq_curves
+from aswaxs_live.tools.iq_viewer.viewer import H5CurveRecord, _curve_matches_source, _fixed_background_sample_indices, _safe_filename, _subtract_background_curve, _write_curve_export, _xanos_dat_path, discover_iq_curves
 
 
 def _record(label: str, group_path: str, h5_path: str = "") -> H5CurveRecord:

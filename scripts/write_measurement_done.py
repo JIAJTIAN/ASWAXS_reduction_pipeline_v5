@@ -11,7 +11,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from aswaxs_live.bluesky_queue import append_measurement_done_message  # noqa: E402
+from aswaxs_live.workflows.bluesky_queue import append_measurement_done_message  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
